@@ -1,0 +1,29 @@
+// ==UserScript==
+// @name         论坛译读 · Forum Translator
+// @namespace    sunbigfly/forum-translater
+// @version      0.2.0
+// @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
+// @homepageURL  https://github.com/sunbigfly/forum-translater
+// @supportURL   https://github.com/sunbigfly/forum-translater/issues
+// @author       sunbigfly
+// @license      MIT
+// @match        https://www.reddit.com/*
+// @match        https://old.reddit.com/*
+// @match        https://new.reddit.com/*
+// @match        https://reddit.com/*
+// @match        https://x.com/*
+// @match        https://www.x.com/*
+// @match        https://twitter.com/*
+// @match        https://www.twitter.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @connect      *
+// @connect      translate.googleapis.com
+// @connect      edge.microsoft.com
+// @connect      api-edge.cognitive.microsofttranslator.com
+// @run-at       document-end
+// @noframes
+// ==/UserScript==

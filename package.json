@@ -1,0 +1,28 @@
+{
+  "name": "forum-translator",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/build-userscript.mjs",
+    "build:local": "npm run build",
+    "audit": "node scripts/audit-userscript.mjs",
+    "verify": "npm run typecheck && npm run build && npm test && npm run audit"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.10.1",
+    "esbuild": "0.25.12",
+    "eslint": "^10.0.1",
+    "fake-indexeddb": "^6.2.4",
+    "jsdom": "^27.2.0",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8.48.1",
+    "vitest": "^4.0.15"
+  }
+}
