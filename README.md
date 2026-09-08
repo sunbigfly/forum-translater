@@ -2,7 +2,7 @@
   <h1>论坛译读 · Forum Translator</h1>
   <strong>读懂 Reddit 与 X，顺手积累进阶词汇</strong>
   <br><br>
-  <a href="https://github.com/sunbigfly/forum-translater/raw/refs/heads/main/dist/forum-translator.user.js"><img alt="安装脚本" src="https://img.shields.io/badge/Userscript-安装脚本-536af5"></a>
+  <a href="https://greasyfork.org/zh-CN/scripts/594954"><img alt="安装脚本" src="https://img.shields.io/badge/Userscript-安装脚本-536af5"></a>
   <img alt="版本" src="https://img.shields.io/badge/version-0.2.0-536af5">
   <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/badge/license-MIT-f5de53"></a>
 </div>
@@ -14,7 +14,7 @@
 ## 安装与开始使用
 
 1. 在浏览器中安装 Tampermonkey 等用户脚本管理器，推荐新版 Chrome 或 Edge。
-2. [安装正式脚本](https://github.com/sunbigfly/forum-translater/raw/refs/heads/main/dist/forum-translator.user.js)。
+2. [安装正式脚本](https://greasyfork.org/zh-CN/scripts/594954)。
 3. 打开 Reddit 或 X，默认使用 Google 翻译；从油猴菜单打开「Reddit 翻译设置」或「X 翻译设置」。
 4. 需要 AI 翻译与词汇学习时，配置兼容 Responses API 的服务地址、密钥和模型，选择 AI 并保存应用。
 
