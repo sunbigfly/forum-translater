@@ -1,6 +1,7 @@
 // ==UserScript==
 // @name         论坛译读 · Forum Translator
 // @name:en      Forum Translator
+// @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
 // @version      0.2.0
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
