@@ -6,3 +6,5 @@ dev.user.js
 .env
 .env.*
 !.env.example
+
+dist/reddit-demand-translator.user.js*
