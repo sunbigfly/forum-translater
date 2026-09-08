@@ -4,6 +4,8 @@ import { TranslationCache, TranslationService } from './translation/service';
 import { mountControls } from './ui';
 import { XLayout } from './x-layout';
 import { XSearch } from './x-search';
+import { RedditMediaResize } from './reddit-media-resize';
+import { RedditAds } from './reddit-ads';
 
 function boot(): void {
   if (document.querySelector('[data-ft-owned="style"]')) return;
@@ -11,6 +13,8 @@ function boot(): void {
   let settings = loadSettings();
   const layout = new XLayout(settings, collapsed => { settings = { ...settings, xCollapseSidebar: collapsed }; saveSettings(settings); });
   const search = new XSearch();
+  const redditMedia = new RedditMediaResize();
+  const redditAds = new RedditAds();
   const cache = new TranslationCache();
   let runtime: RedditRuntime | undefined;
   const restart = (): void => {
@@ -30,7 +34,7 @@ function boot(): void {
   window.addEventListener('pagehide', event => {
     runtime?.destroy(); runtime = undefined; cache.flush();
     search.close(false);
-    if (!event.persisted) { search.destroy(); layout.destroy(); removeControls(); style.remove(); }
+    if (!event.persisted) { search.destroy(); layout.destroy(); redditMedia.destroy(); redditAds.destroy(); removeControls(); style.remove(); }
   });
   window.addEventListener('pageshow', event => { if (event.persisted) restart(); });
 }

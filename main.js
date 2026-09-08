@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.0
+// @version      0.2.1
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -3760,10 +3760,11 @@ ${word.memoryMeaning ?? ""}` : word.example;
   // src/x-video-resize.ts
   var DEFAULT_WIDTH = 420;
   var XVideoResize = class {
-    constructor(kind = "video") {
+    constructor(kind = "video", site = "x") {
       this.kind = kind;
-      this.sizeKey = `ft:x-${kind}-width:v1`;
-      this.widthProperty = `--ft-x-${kind}-width`;
+      this.site = site;
+      this.sizeKey = `ft:${site}-${kind}-width:v1`;
+      this.widthProperty = `--ft-${site}-${kind}-width`;
       this.attribute = `data-ft-${kind}-resizable`;
       const saved = GM_getValue(this.sizeKey, DEFAULT_WIDTH);
       if (typeof saved === "number" && Number.isFinite(saved)) this.width = Math.max(180, Math.min(2400, saved));
@@ -3775,7 +3776,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
     contentObservers = /* @__PURE__ */ new Map();
     fitContent(root) {
       root.style.removeProperty("--ft-media-fit-width");
-      if (document.fullscreenElement || this.kind !== "video") return;
+      if (document.fullscreenElement || this.kind !== "video" || this.site !== "x") return;
       const player = root.querySelector('[data-testid="videoPlayer"],video');
       if (!player) return;
       const content = player.getBoundingClientRect();
@@ -3793,7 +3794,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
     sizeKey;
     widthProperty;
     attribute;
-    reconcile() {
+    reconcile(mediaRoots) {
       for (const [root, controls] of this.roots) {
         if (!root.isConnected || !root.contains(controls) || this.kind === "image" && (root.closest("[data-ft-video-resizable]") || root.querySelector('video,[data-testid="videoPlayer"],[data-testid="videoComponent"]'))) {
           controls.remove();
@@ -3804,8 +3805,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
       }
       const selector = this.kind === "video" ? '[data-testid="videoPlayer"],video' : '[data-testid="tweetPhoto"],img[src*="pbs.twimg.com/media/"],img[data-testid="card_img"],[data-testid="card.layoutLarge.media"] img';
       const containsPost = (node) => [...node.querySelectorAll('[data-testid="tweetText"],[data-testid="User-Name"],[data-testid^="UserAvatar"],time,[role="group"]')].some((item) => !item.closest('[data-testid="videoPlayer"],[data-testid="videoComponent"],[data-ft-owned]'));
-      const desired = /* @__PURE__ */ new Set();
-      for (const player of document.querySelectorAll(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
+      const desired = new Set(mediaRoots);
+      for (const player of mediaRoots ? [] : document.querySelectorAll(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
         if (this.kind === "image" && player.closest('[data-ft-video-resizable],[data-testid="videoComponent"],[data-testid="videoPlayer"]')) continue;
         let root = this.kind === "video" ? player.closest('[data-testid="videoComponent"]') ?? player.parentElement : player.closest("a") ?? player;
         if (root && containsPost(root)) root = player.parentElement;
@@ -3815,6 +3816,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
         }
         if (!root) continue;
         desired.add(root);
+      }
+      for (const root of desired) {
         if (this.roots.has(root)) continue;
         root.setAttribute(this.attribute, "");
         const controls = document.createElement("div");
@@ -4222,6 +4225,109 @@ ${word.memoryMeaning ?? ""}` : word.example;
     }
   };
 
+  // src/reddit-media-resize.ts
+  var mediaSelector = 'shreddit-post [slot="post-media-container"],shreddit-post [slot="post-media"],[data-testid="post-container"] [data-click-id="media"],.thing.link > .entry .expando';
+  var videoSelector = "shreddit-player,reddit-video-player,video,iframe";
+  var RedditMediaResize = class {
+    videos;
+    images;
+    observer;
+    timer;
+    roots = /* @__PURE__ */ new Set();
+    constructor() {
+      if (!/(^|\.)reddit\.com$/.test(location.hostname)) return;
+      this.videos = new XVideoResize("video", "reddit");
+      this.images = new XVideoResize("image", "reddit");
+      this.observer = new MutationObserver(() => {
+        this.timer ??= setTimeout(() => {
+          this.timer = void 0;
+          this.reconcile();
+        }, 150);
+      });
+      this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["slot", "src", "data-click-id"] });
+      this.reconcile();
+    }
+    reconcile() {
+      const videos = /* @__PURE__ */ new Set();
+      const images = /* @__PURE__ */ new Set();
+      for (const root of document.querySelectorAll(mediaSelector)) {
+        if (root.closest("[data-ft-owned],shreddit-ad-post") || root.parentElement?.closest(mediaSelector)) continue;
+        if (root.matches(videoSelector) || root.querySelector(videoSelector)) videos.add(root);
+        else if (root.matches("img,shreddit-gallery") || root.querySelector("img,shreddit-gallery")) images.add(root);
+      }
+      const desired = /* @__PURE__ */ new Set([...videos, ...images]);
+      for (const root of this.roots) if (!desired.has(root)) root.removeAttribute("data-ft-reddit-media");
+      for (const root of desired) {
+        const kind = videos.has(root) ? "video" : "image";
+        if (root.getAttribute("data-ft-reddit-media") !== kind) root.setAttribute("data-ft-reddit-media", kind);
+      }
+      this.roots = desired;
+      this.images?.reconcile(images);
+      this.videos?.reconcile(videos);
+    }
+    destroy() {
+      this.observer?.disconnect();
+      clearTimeout(this.timer);
+      this.images?.destroy();
+      this.videos?.destroy();
+      for (const root of this.roots) root.removeAttribute("data-ft-reddit-media");
+      this.roots.clear();
+    }
+  };
+
+  // src/reddit-ads.ts
+  var adContainerSelector = "shreddit-ad-post,shreddit-comments-page-ad";
+  var postSelector = `${adContainerSelector},shreddit-post,[data-testid="post-container"],.thing.link`;
+  var promotionAttributes = ["promoted", "is-promoted", "is-sponsored", "data-promoted"];
+  function isRedditAd(post) {
+    if (post.matches(`${adContainerSelector},.thing.link.promoted`)) return true;
+    if (promotionAttributes.some((name) => post.hasAttribute(name) && !/^(false|0)$/i.test(post.getAttribute(name)?.trim() ?? ""))) return true;
+    for (const marker of post.querySelectorAll('[slot="credit-bar"] :is(span,a),[data-testid="promoted-label"],.promoted-tag')) {
+      if (marker.closest(postSelector) !== post || marker.closest("[data-ft-owned]")) continue;
+      if (marker.matches('[data-testid="promoted-label"],.promoted-tag') || /^(Ad|Promoted|Sponsored|广告|廣告|推广|推廣|赞助|贊助)$/i.test(marker.textContent?.trim() ?? "")) return true;
+    }
+    return false;
+  }
+  var RedditAds = class {
+    hidden = /* @__PURE__ */ new Set();
+    observer;
+    timer;
+    constructor() {
+      if (!/(^|\.)reddit\.com$/.test(location.hostname)) return;
+      this.observer = new MutationObserver(() => {
+        this.timer ??= setTimeout(() => {
+          this.timer = void 0;
+          this.reconcile();
+        }, 150);
+      });
+      this.observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: [...promotionAttributes, "class", "slot", "data-testid"]
+      });
+      this.reconcile();
+    }
+    reconcile() {
+      const next = /* @__PURE__ */ new Set();
+      for (const post of document.querySelectorAll(postSelector)) {
+        if (post.closest("[data-ft-owned]") || !isRedditAd(post)) continue;
+        if ([...next].some((ancestor) => ancestor.contains(post))) continue;
+        next.add(post);
+      }
+      for (const post of this.hidden) if (!next.has(post)) post.removeAttribute("data-ft-reddit-ad");
+      for (const post of next) if (!post.hasAttribute("data-ft-reddit-ad")) post.setAttribute("data-ft-reddit-ad", "");
+      this.hidden = next;
+    }
+    destroy() {
+      this.observer?.disconnect();
+      clearTimeout(this.timer);
+      for (const post of this.hidden) post.removeAttribute("data-ft-reddit-ad");
+      this.hidden.clear();
+    }
+  };
+
   // src/main.ts
   function boot() {
     if (document.querySelector('[data-ft-owned="style"]')) return;
@@ -4259,7 +4365,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
 [data-ft-owned="translation"][data-translation-theme="underline"]:not(.ft-translation-only){text-decoration:underline;text-decoration-color:#8887;text-decoration-thickness:1px;text-underline-offset:.18em}
 [data-ft-owned="translation"][data-translation-theme="highlight"]:not(.ft-translation-only){padding:.5em .7em;border-radius:.55em;background:#e9b94922}
 [data-ft-owned="translation"][data-translation-theme="paper"]:not(.ft-translation-only){padding:.35em .7em;border:1px solid #8884;border-radius:.6em;background:#8888880a;box-shadow:0 .18em .55em #0f172a12}
-[data-ft-owned="translation"]{white-space:pre-wrap}
+/* Preserve bare-text translations, but collapse host markup whitespace around blocks. */
+[data-ft-owned="translation"]:not(:has(> :is(p,ul,ol,blockquote,pre,table,h1,h2,h3,h4))){white-space:pre-wrap}
 [data-testid="tweetText"] > [data-ft-owned="translation"]{margin-block:6px 12px}
 /* Short translations hug their text; long paragraphs wrap within the post. */
 article[data-testid="tweet"] [data-ft-owned="translation"]{width:fit-content;max-width:100%;min-width:0;align-self:flex-start}
@@ -4300,6 +4407,13 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 /* Keep inline videos compact when the reading column is widened. */
 [data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){position:relative!important;width:min(100%,var(--ft-media-fit-width,var(--ft-x-video-width,420px)))!important;max-width:var(--ft-x-video-width,420px)!important;min-width:0!important}
 [data-ft-image-resizable]{position:relative!important;width:100%!important;max-width:var(--ft-x-image-width,420px)!important;min-width:0!important}
+/* Reddit media slots retain their native player/gallery and share only resize controls. */
+[data-ft-reddit-media]{--ft-x-image-width:var(--ft-reddit-image-width,420px);--ft-x-video-width:var(--ft-reddit-video-width,420px);box-sizing:border-box;align-self:flex-start}
+[data-ft-reddit-media]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){height:auto!important;min-height:0!important}
+[data-ft-reddit-media="image"] img{max-width:100%!important;object-fit:contain}
+[data-ft-reddit-media="image"] a > img,[data-ft-reddit-media="image"] > img{width:100%!important;height:auto!important}
+[data-ft-reddit-media] :is(shreddit-player,reddit-video-player,shreddit-gallery){display:block;max-width:100%;width:100%}
+[data-ft-reddit-media]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *) video{max-width:100%!important;height:auto!important}
 /* X carousel tiles retain their old pixel width after their parent is resized. */
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]){margin-inline:0!important;padding-inline:0!important;scroll-padding-inline:0!important;gap:6px!important;align-items:flex-start!important;min-width:0!important;width:100%!important;height:auto!important}
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div{flex:0 0 calc((100% - 6px)/2)!important;width:calc((100% - 6px)/2)!important;min-width:0!important;height:auto!important;margin-inline:0!important}
@@ -4329,6 +4443,7 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"] :is(div:has(> [data-testid="primaryColumn"]),[data-testid="primaryColumn"]){width:100%!important;max-width:none!important;min-width:0!important;flex-basis:auto!important}
 [data-ft-x-hidden-icon]{display:none!important}
 [data-ft-x-ad]{display:none!important}
+[data-ft-reddit-ad]{display:none!important}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] [data-testid="primaryColumn"] div:has(> section [data-testid="cellInnerDiv"]){width:100%!important;max-width:none!important}
 /* Never hide a shared heading or navigation container. */
 a[data-ft-x-native-logo]:not(:has(nav)):not(:has([data-ft-owned="x-sidebar-toggle"])){display:none!important}
@@ -4367,6 +4482,8 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
       saveSettings(settings);
     });
     const search = new XSearch();
+    const redditMedia = new RedditMediaResize();
+    const redditAds = new RedditAds();
     const cache = new TranslationCache();
     let runtime;
     const restart = () => {
@@ -4396,6 +4513,8 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
       if (!event.persisted) {
         search.destroy();
         layout.destroy();
+        redditMedia.destroy();
+        redditAds.destroy();
         removeControls();
         style.remove();
       }

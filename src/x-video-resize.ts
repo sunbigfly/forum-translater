@@ -8,7 +8,7 @@ export class XVideoResize {
 
   private fitContent(root: HTMLElement): void {
     root.style.removeProperty('--ft-media-fit-width');
-    if (document.fullscreenElement || this.kind !== 'video') return;
+    if (document.fullscreenElement || this.kind !== 'video' || this.site !== 'x') return;
     const player = root.querySelector<HTMLElement>('[data-testid="videoPlayer"],video');
     if (!player) return;
     const content = player.getBoundingClientRect(); const frame = root.getBoundingClientRect();
@@ -26,16 +26,16 @@ export class XVideoResize {
   private readonly sizeKey: string;
   private readonly widthProperty: string;
   private readonly attribute: string;
-  constructor(private readonly kind: 'video' | 'image' = 'video') {
-    this.sizeKey = `ft:x-${kind}-width:v1`;
-    this.widthProperty = `--ft-x-${kind}-width`;
+  constructor(private readonly kind: 'video' | 'image' = 'video', private readonly site: 'x' | 'reddit' = 'x') {
+    this.sizeKey = `ft:${site}-${kind}-width:v1`;
+    this.widthProperty = `--ft-${site}-${kind}-width`;
     this.attribute = `data-ft-${kind}-resizable`;
     const saved: unknown = GM_getValue(this.sizeKey, DEFAULT_WIDTH);
     if (typeof saved === 'number' && Number.isFinite(saved)) this.width = Math.max(180, Math.min(2400, saved));
     this.applyWidth(this.width);
   }
 
-  reconcile(): void {
+  reconcile(mediaRoots?: Iterable<HTMLElement>): void {
     for (const [root, controls] of this.roots) {
       if (!root.isConnected || !root.contains(controls) || this.kind === 'image' && (root.closest('[data-ft-video-resizable]') || root.querySelector('video,[data-testid="videoPlayer"],[data-testid="videoComponent"]'))) {
         controls.remove(); root.removeAttribute(this.attribute); this.unwatch(root); this.roots.delete(root);
@@ -44,8 +44,8 @@ export class XVideoResize {
     const selector = this.kind === 'video' ? '[data-testid="videoPlayer"],video' : '[data-testid="tweetPhoto"],img[src*="pbs.twimg.com/media/"],img[data-testid="card_img"],[data-testid="card.layoutLarge.media"] img';
     const containsPost = (node: HTMLElement): boolean => [...node.querySelectorAll('[data-testid="tweetText"],[data-testid="User-Name"],[data-testid^="UserAvatar"],time,[role="group"]')]
       .some(item => !item.closest('[data-testid="videoPlayer"],[data-testid="videoComponent"],[data-ft-owned]'));
-    const desired = new Set<HTMLElement>();
-    for (const player of document.querySelectorAll<HTMLElement>(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
+    const desired = new Set<HTMLElement>(mediaRoots);
+    for (const player of mediaRoots ? [] : document.querySelectorAll<HTMLElement>(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
       if (this.kind === 'image' && player.closest('[data-ft-video-resizable],[data-testid="videoComponent"],[data-testid="videoPlayer"]')) continue;
       let root = this.kind === 'video' ? player.closest<HTMLElement>('[data-testid="videoComponent"]') ?? player.parentElement : player.closest<HTMLAnchorElement>('a') ?? player;
       // A quoted post may itself be one large link. Keep its author and text outside the media root.
@@ -57,6 +57,8 @@ export class XVideoResize {
       }
       if (!root) continue;
       desired.add(root);
+    }
+    for (const root of desired) {
       if (this.roots.has(root)) continue;
       root.setAttribute(this.attribute, '');
       const controls = document.createElement('div'); controls.dataset.ftOwned = 'video-resize';
