@@ -6,7 +6,7 @@ import { withTranslationRetry } from './translation/retry';
 import { translationTextFingerprint } from './translation/translation-text';
 import type { TranslationTaskManager, TranslationTaskPriority } from './translation/translation-task-manager';
 
-export interface VocabularyWord { word: string; ipa: string; meaning: string; example: string; level: 'CET4' | 'CET6' | 'CET6+'; memoryExample?: string; memoryMeaning?: string; memoryTerm?: string; translatedTerm?: string }
+export interface VocabularyWord { word: string; ipa: string; meaning: string; example: string; level: 'CET4' | 'CET6' | 'CET6+'; exampleMeaning?: string; memoryExample?: string; memoryMeaning?: string; memoryTerm?: string; translatedTerm?: string }
 export interface SavedWord extends VocabularyWord { sourceUrl: string; addedAt: number; due: number; stage: number }
 const BOOK = 'ft:wordbook:v1';
 const CACHE = 'ft:vocabulary:v1';
@@ -18,6 +18,7 @@ function words(value: unknown): VocabularyWord[] {
     return typeof word.word === 'string' && /^[a-z]+(?:[-'][a-z]+)*$/i.test(word.word) && word.word.length <= 40
       && typeof word.ipa === 'string' && word.ipa.length <= 100 && typeof word.meaning === 'string' && word.meaning.length <= 200
       && typeof word.example === 'string' && word.example.length <= 500 && (word.level === 'CET4' || word.level === 'CET6' || word.level === 'CET6+')
+      && (word.exampleMeaning === undefined || typeof word.exampleMeaning === 'string' && word.exampleMeaning.length <= 2000)
       && (word.memoryExample === undefined || typeof word.memoryExample === 'string' && word.memoryExample.length <= 240)
       && (word.memoryTerm === undefined || typeof word.memoryTerm === 'string' && word.memoryTerm.length <= 30)
       && (word.translatedTerm === undefined || typeof word.translatedTerm === 'string' && word.translatedTerm.length <= 30)

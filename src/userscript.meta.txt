@@ -23,6 +23,8 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @connect      *
+// @connect      en.wiktionary.org
+// @connect      api.tatoeba.org
 // @connect      translate.googleapis.com
 // @connect      edge.microsoft.com
 // @connect      api-edge.cognitive.microsofttranslator.com

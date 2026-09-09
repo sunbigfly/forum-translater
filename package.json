@@ -24,5 +24,8 @@
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.48.1",
     "vitest": "^4.0.15"
+  },
+  "dependencies": {
+    "opencc-js": "^1.4.2"
   }
 }

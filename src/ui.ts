@@ -37,6 +37,7 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     @media(max-width:680px){dialog{width:calc(100vw - 20px);height:94dvh;border-radius:16px}.layout{display:block;padding:16px}nav{position:static;display:flex;overflow:auto;border-left:0;border-bottom:1px solid #ddd8cf;margin-bottom:16px}nav button{flex:1;white-space:nowrap;min-height:44px;border-left:0;border-bottom:2px solid transparent;padding:8px}nav button[aria-selected=true]{border-bottom-color:#4758d6}nav small{display:none}.section{padding:16px}.pair{grid-template-columns:1fr;gap:0}footer{padding:12px 16px;flex-wrap:wrap}header{padding:12px 16px}}
   `;
   shadow.append(style);
+  let disposeWordbook: (() => void) | undefined;
   let modelRequest: AbortController | undefined;
   let modelTimer: ReturnType<typeof setTimeout> | undefined;
   let previousFocus: HTMLElement | null = null;
@@ -58,7 +59,7 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
       for (const [key, section] of sections) section.hidden = key !== id;
       for (const [key, tab] of tabs) { tab.setAttribute('aria-selected', String(key === id)); tab.tabIndex = key === id ? 0 : -1; }
     };
-    for (const [id, name, description] of [['api', '接口', '地址、密钥与模型'], ['scope', '翻译范围', '内容与预加载'], ['words', '单词本', '收藏预览与继续学习'], ['cache', '缓存与说明', '本地数据与隐私']] as const) {
+    for (const [id, name, description] of [['api', '接口', '地址、密钥与模型'], ['scope', '翻译范围', '内容与预加载'], ['words', '单词本', '列表管理与词典详情'], ['cache', '缓存与说明', '本地数据与隐私']] as const) {
       const tab = document.createElement('button'); tab.type = 'button'; tab.id = `ft-tab-${id}`; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `ft-panel-${id}`);
       const strong = document.createElement('strong'); strong.textContent = name; const small = document.createElement('small'); small.textContent = description; tab.append(strong, small);
       tab.onclick = () => activate(id); nav.append(tab); tabs.set(id, tab);
@@ -91,7 +92,7 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     theme.value = current.translationTheme; themeLabel.append(theme); scope.append(themeLabel);
     input('enabled', '开启本页及后续页面自动翻译', 'checkbox', current.enabled);
     input('vocabulary', '整篇翻译完成后自动生成词汇学习（使用 AI 配置）', 'checkbox', current.vocabulary);
-    const wordbook = sections.get('words'); if (wordbook) renderWordbook(wordbook);
+    const wordbook = sections.get('words'); if (wordbook) disposeWordbook = renderWordbook(wordbook);
     for (const [key, label] of [['title', '帖子标题'], ['body', '帖子正文'], ['comment', '评论']] as const) {
       const field = input(key, isXSite() && key === 'body' ? '推文、回复与引用推文' : label, 'checkbox', current[key]);
       if (isXSite() && key !== 'body' && field.parentElement) field.parentElement.hidden = true;
@@ -209,6 +210,7 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     };
   }
   function setOpen(open: boolean): void {
+    disposeWordbook?.(); disposeWordbook = undefined;
     if (!open) stopWordSpeech(shadow);
     modelRequest?.abort(); clearTimeout(modelTimer);
     if (open) {
@@ -224,5 +226,5 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
   const metricsMenu = GM_registerMenuCommand('翻译性能统计（当前页面）', () => { alert(JSON.stringify(readTranslationMetrics(), null, 2)); });
   // Guard helps hot-reload owners distinguish this surface from host DOM.
   if (!host.matches(OWNED)) throw new Error('Missing UI ownership');
-  return () => { stopWordSpeech(shadow); modelRequest?.abort(); clearTimeout(modelTimer); if (dialog.open) dialog.close(); GM_unregisterMenuCommand(menu); GM_unregisterMenuCommand(metricsMenu); host.remove(); };
+  return () => { disposeWordbook?.(); stopWordSpeech(shadow); modelRequest?.abort(); clearTimeout(modelTimer); if (dialog.open) dialog.close(); GM_unregisterMenuCommand(menu); GM_unregisterMenuCommand(metricsMenu); host.remove(); };
 }

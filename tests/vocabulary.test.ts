@@ -5,7 +5,7 @@ import { collectVocabulary, readWordbook, removeWord, reviewWord, saveWord, spea
 import { requestVocabularyText } from '../src/vocabulary-stream';
 import { TranslationTaskManager } from '../src/translation/translation-task-manager';
 import { DEFAULTS } from '../src/settings';
-import { mountVocabulary, renderWordbook } from '../src/vocabulary-ui';
+import { mountVocabulary } from '../src/vocabulary-ui';
 import { TranslationCache, TranslationService } from '../src/translation/service';
 vi.mock('../src/vocabulary-stream', async importOriginal => ({ ...await importOriginal<typeof import('../src/vocabulary-stream')>(), requestVocabularyText: vi.fn() }));
 const word: VocabularyWord = { word: 'publish', ipa: '/ˈpʌblɪʃ/', meaning: '发布', example: 'They publish it.', level: 'CET4' };
@@ -85,15 +85,6 @@ it('shows only three compact words and expands examples and remaining words on d
     rows[0]?.querySelector<HTMLButtonElement>('.ft-audio')?.click(); expect(example?.hidden).toBe(true);
     expect(shadow?.querySelector('h3')).toBeNull(); expect(shadow?.querySelector('section')?.textContent).not.toContain('六级参考');
   } finally { destroy(); service.destroy(); }
-});
-it('supports reveal, review and returning to the saved word preview', () => {
-  saveWord(word, 'https://reddit.com/'); const root = document.createElement('section'); document.body.append(root); renderWordbook(root);
-  const click = (label: string): void => { [...root.querySelectorAll('button')].find(button => button.textContent === label)?.click(); };
-  click('继续学习');
-  expect(root.querySelector<HTMLInputElement>('input')?.hidden).toBe(true);
-  click('显示释义'); click('记住了'); expect(root.textContent).toContain('本轮学习完成');
-  click('返回单词本'); expect(root.querySelector<HTMLInputElement>('input')?.hidden).toBe(false);
-  expect(readWordbook()[0]?.stage).toBe(1);
 });
 it('keeps loading vocabulary hidden and shows words as they arrive', async () => {
   const entry = { ...word, word: 'substantial', level: 'CET6', memoryExample: 'A substantial meal.', memoryMeaning: '一顿丰盛的饭。', memoryTerm: '丰盛' };

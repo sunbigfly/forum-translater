@@ -1,4 +1,5 @@
-import { collectVocabulary, readWordbook, removeWord, reviewWord, saveWord, speakWord, stopWordSpeech, type VocabularyWord } from './vocabulary';
+import { mountWordbook } from './wordbook';
+import { collectVocabulary, readWordbook, saveWord, speakWord, stopWordSpeech, type VocabularyWord } from './vocabulary';
 import type { TranslationService } from './translation/service';
 import { applyVocabularyInk, VocabularyHighlights } from './vocabulary-highlights';
 
@@ -188,36 +189,6 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
   return () => { controller.abort(); stopCombined?.(); visibility?.disconnect(); translationObserver.disconnect(); highlights.clear(); stopWordSpeech(shadow); host.remove(); };
 }
 
-export function renderWordbook(root: HTMLElement): void {
-  stopWordSpeech(root);
-  root.replaceChildren();
-  const heading = document.createElement('h2'); heading.textContent = '单词本'; root.append(heading);
-  const status = document.createElement('p'); status.setAttribute('role', 'status'); root.append(status);
-  const book = readWordbook(); const due = book.filter(word => word.due <= Date.now());
-  const info = document.createElement('p'); info.textContent = `已收藏 ${book.length} 词，今天待复习 ${due.length} 词。`; root.append(info);
-  const session = document.createElement('div'); const list = document.createElement('div');
-  root.append(button('继续学习', () => {
-    list.hidden = true; search.hidden = true;
-    const queue = [...(due.length ? due : book)].sort((a, b) => a.due - b.due); let index = 0;
-    const next = (): void => {
-      session.replaceChildren(); const word = queue[index];
-      if (!word) { session.textContent = '本轮学习完成。'; session.append(button('返回单词本', () => renderWordbook(root))); return; }
-      const label = document.createElement('p'); label.textContent = `${index + 1} / ${queue.length} · ${word.word} ${word.ipa}`;
-      const answer = document.createElement('div'); answer.hidden = true; answer.append(wordDetails(word, status));
-      answer.append(button('忘记了', () => { reviewWord(word.word, false); index++; next(); }), button('记住了', () => { reviewWord(word.word, true); index++; next(); }));
-      session.append(label, soundButton(word, status), button('显示释义', () => { answer.hidden = false; }), answer, button('返回单词本', () => renderWordbook(root)));
-    };
-    next();
-  }));
-  root.append(session);
-  const search = document.createElement('input'); search.type = 'search'; search.placeholder = '搜索收藏单词或释义'; search.setAttribute('aria-label', '搜索单词本'); root.append(search, list);
-  const preview = (): void => {
-    list.replaceChildren(); const query = search.value.trim().toLowerCase();
-    for (const word of readWordbook().filter(item => `${item.word} ${item.meaning}`.toLowerCase().includes(query)).slice(-100).reverse()) {
-      const card = wordDetails(word, status);
-      card.append(button('移除收藏', () => { removeWord(word.word); renderWordbook(root); })); list.append(card);
-    }
-    if (!list.childElementCount) list.textContent = book.length ? '没有匹配的单词。' : '在正文末尾收藏单词后，即可在这里继续学习。';
-  };
-  search.oninput = preview; preview();
+export function renderWordbook(root: HTMLElement): () => void {
+  return mountWordbook(root, soundButton);
 }
