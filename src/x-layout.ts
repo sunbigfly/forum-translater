@@ -1,3 +1,4 @@
+import { XPostViewport } from './x-post-viewport';
 import { isXSite, type Settings } from './settings';
 import { XAds } from './x-ads';
 import { XVideoResize } from './x-video-resize';
@@ -6,6 +7,7 @@ type LayoutSettings = Pick<Settings, 'xCollapseSidebar' | 'xHideFloatingIcons' |
 const launchers = '[data-testid="GrokDrawer"],[data-testid="DMDrawer"],button[aria-label*="Grok"],[role="button"][aria-label*="Grok"],a[href="/i/grok"],[aria-label="Chat"],[aria-label="聊天"],[aria-label="Messages"],[aria-label="私信"]';
 
 export class XLayout {
+  private viewport: XPostViewport | undefined;
   private observer: MutationObserver | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private hidden = new Set<HTMLElement>();
@@ -19,6 +21,7 @@ export class XLayout {
   private images: XVideoResize | undefined;
   constructor(private settings: LayoutSettings, private readonly save: (collapsed: boolean) => void) {
     if (!isXSite()) return;
+    this.viewport = new XPostViewport();
     this.videos = new XVideoResize();
     this.images = new XVideoResize('image');
     const toggle = document.createElement('button'); toggle.type = 'button'; toggle.dataset.ftOwned = 'x-sidebar-toggle';
@@ -101,9 +104,10 @@ export class XLayout {
     if (!back) return;
     // Consume Escape before the host handles it too; only the native back click
     // should navigate, otherwise one keypress can trigger two route changes.
-    event.preventDefault(); event.stopImmediatePropagation(); back.click();
+    event.preventDefault(); event.stopImmediatePropagation(); this.viewport?.restore(); back.click();
   };
   destroy(): void {
+    this.viewport?.destroy();
     this.videos?.destroy();
     this.images?.destroy();
     this.ads.destroy();

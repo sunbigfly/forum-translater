@@ -1,11 +1,12 @@
 import { redditContext } from './reddit-context';
 import { mountVocabulary } from './vocabulary-ui';
 import { xParagraphs } from './x-paragraphs';
+import { XLongPosts, updateXLongPostFold } from './x-long-posts';
 import { FeedDeduplicator } from './feed-deduplicator';
 import { TabTitle } from './tab-title';
 import { contentIdentity, discover, isReadable, OWNED, sourceSnapshot } from './reddit';
 import { OriginalVisibility } from './original-visibility';
-import { loadTranslationOnly, type Kind, type Settings, type TranslationTheme } from './settings';
+import { isXSite, loadTranslationOnly, type Kind, type Settings, type TranslationTheme } from './settings';
 import { TranslationService } from './translation/service';
 import { renderTranslationText, renderTranslationSections, translationBlockNeedsTranslation, translationSectionPlans, translationTextPlan } from './translation/translation-text';
 import { TRANSLATION_PROMPT_VERSION } from './translation/translation-prompt';
@@ -23,6 +24,8 @@ function matchTextStyle(target: HTMLElement, source: Element): void {
 }
 export class RedditRuntime {
   private entries = new Map<HTMLElement, Entry>();
+  private longPosts = new XLongPosts();
+  private detached = new Map<Entry, number>();
   private completedParagraphs = new Map<string, string>();
   private nearObserver: IntersectionObserver;
   private visibleObserver: IntersectionObserver;
@@ -109,25 +112,43 @@ export class RedditRuntime {
     this.service.setForeground(first?.owner);
   }
   private remove(entry: Entry): void {
+    this.detached.delete(entry);
     entry.learning?.(); entry.learning = null;
     this.cancel(entry); entry.originals.restore(); for (const item of entry.inlineBoxes) item.remove(); entry.box?.remove(); this.nearObserver.unobserve(entry.element);
     this.visibleObserver.unobserve(entry.element); this.service.release(entry.owner); this.entries.delete(entry.element);
   }
   private reconcile(): void {
     if (this.destroyed) return;
+    this.longPosts.reconcile();
     this.feed.reconcile();
     if (this.route !== location.href) {
       this.tabTitle.reset();
       this.route = location.href; this.translationOnly = loadTranslationOnly();
-      for (const entry of this.entries.values()) this.remove(entry);
-      this.service.resetPending();
+      // X may keep the feed tree while showing a Post. Do not tear down its
+      // translations, vocabulary listeners, or task manager just because the URL changed.
+      if (!isXSite()) {
+        for (const entry of this.entries.values()) this.remove(entry);
+        this.service.resetPending();
+      }
       this.roots.clear(); this.roots.add(document);
     }
-    for (const entry of this.entries.values()) if (!entry.element.isConnected) this.remove(entry);
+    for (const entry of this.entries.values()) {
+      if (entry.element.isConnected) { this.detached.delete(entry); continue; }
+      // A completed feed subtree can be detached and reattached by X's router.
+      // Keep its actual nodes briefly; cap retention to avoid collecting virtualized history.
+      if (isXSite() && entry.state === 'done') {
+        const since = this.detached.get(entry) ?? Date.now(); this.detached.set(entry, since);
+        if (Date.now() - since < 60000) continue;
+      }
+      this.remove(entry);
+    }
+    while (this.detached.size > 50) { const oldest = this.detached.keys().next().value; if (oldest) this.remove(oldest); }
     for (const root of this.roots) {
       if (root instanceof Element && !root.isConnected) continue;
-      for (const { element, kind } of discover(root)) {
+      for (const candidate of discover(root)) {
+        const { kind } = candidate;
         if (!this.settings[kind]) continue;
+        const element = this.longPosts.prepare(candidate.element);
         const snapshot = sourceSnapshot(element);
         const signature = snapshot.innerHTML;
         const identity = contentIdentity(element);
@@ -186,14 +207,32 @@ export class RedditRuntime {
       return `paragraph:v1:${JSON.stringify([this.settings.provider, ai ? [ai.baseUrl.replace(/\/+$/, ''), ai.model, ai.prompt, TRANSLATION_PROMPT_VERSION, this.settings.vocabulary] : null, entry.identity || `node:${entry.owner}`, entry.kind, plan.text, protectedNodes])}`;
     });
     const postContext = plans.map(item => item.text).join('\n\n').slice(0, 24000);
+    const previews = new Map<number, string>();
+    const previous = entry.identity ? new Map([...this.service.cache.matching('paragraph:v1:'), ...this.completedParagraphs]) : new Map<string, string>();
     plans.forEach(plan => {
       const key = paragraphKeys[plan.index] ?? '';
       const cached = this.completedParagraphs.get(key) ?? (entry.identity ? this.service.cache.get(key) : undefined);
-      if (cached !== undefined && (!ai || !this.settings.vocabulary || this.service.hasVocabulary(postContext))) entry.completed.set(plan.index, cached);
+      if (cached !== undefined) { entry.completed.set(plan.index, cached); return; }
+      let longest = 0;
+      for (const [oldKey, value] of previous) {
+        if (!oldKey.startsWith('paragraph:v1:')) continue;
+        try {
+          const parsed: unknown = JSON.parse(oldKey.slice('paragraph:v1:'.length));
+          if (!Array.isArray(parsed)) continue;
+          const parts: unknown[] = parsed;
+          const source = parts[4];
+          if (typeof source !== 'string' || !Array.isArray(parts[5]) || parts[5].length) continue;
+          const prefix = source.replace(/(?:\.{3}|…)\s*$/, '').trimEnd();
+          if (!prefix || prefix.length <= longest || plan.text.length <= prefix.length || !plan.text.startsWith(prefix)) continue;
+          parts[4] = plan.text;
+          if (`paragraph:v1:${JSON.stringify(parts)}` !== key) continue;
+          longest = prefix.length; previews.set(plan.index, value);
+        } catch { /* Ignore malformed optional cache entries. */ }
+      }
     });
     const thread = redditContext(entry.element, entry.kind);
-    const translations = new Map(entry.completed);
-    const pending = new Set(plans.filter(plan => !translations.has(plan.index)).map(plan => plan.index));
+    const translations = new Map([...previews, ...entry.completed]);
+    const pending = new Set(plans.filter(plan => !entry.completed.has(plan.index)).map(plan => plan.index));
     const failed = new Set<number>();
     const failureReasons = new Map<number, string>();
     const streaming = new Set<number>();
@@ -261,7 +300,8 @@ export class RedditRuntime {
       if (entry.kind === 'body' && this.settings.vocabulary && !entry.learning) {
         const owner = entry.element.closest('article[data-testid="tweet"],shreddit-post,.thing.link,[data-testid="post-container"]');
         const permalink = owner?.querySelector('time')?.closest('a')?.getAttribute('href') ?? owner?.getAttribute('permalink') ?? owner?.querySelector('a[href*="/comments/"]')?.getAttribute('href') ?? location.href;
-        entry.learning = mountVocabulary(box, postContext, new URL(permalink, location.href).href, this.service, { original: entry.element, translations: entry.inlineBoxes.length ? entry.inlineBoxes : [box] });
+        const learningAnchor = entry.element.closest('[data-ft-long-post]')?.querySelector<HTMLElement>(':scope > [data-ft-owned="long-post-toggle"]') ?? box;
+        entry.learning = mountVocabulary(learningAnchor, postContext, new URL(permalink, location.href).href, this.service, { original: entry.element, translations: entry.inlineBoxes.length ? entry.inlineBoxes : [box] });
       }
       if (inline) {
         for (const plan of plans) {
@@ -277,14 +317,17 @@ export class RedditRuntime {
           else if (pending.has(plan.index)) {
             const status = document.createElement('span'); status.className = failed.has(plan.index) ? 'hnr-translation-failure' : 'hnr-translation-placeholder';
             if (failed.has(plan.index)) status.textContent = `翻译失败：${failureReasons.get(plan.index) ?? '未知错误'}（已保留原文）`; target.replaceChildren(status);
-            if (failed.has(plan.index)) { const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试本段'; retry.onclick = event => { event.preventDefault(); event.stopPropagation(); void run(plan.index, true); }; target.append(retry); }
-          } else target.replaceChildren();
+          }
+          if (failed.has(plan.index)) { const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试本段'; retry.onclick = event => { event.preventDefault(); event.stopPropagation(); void run(plan.index, true); }; target.append(retry); }
+          else if (value === undefined && !pending.has(plan.index)) target.replaceChildren();
         }
+        updateXLongPostFold(entry.element);
         return;
       }
       if (this.translationOnly && pending.size === 0 && failed.size === 0) entry.originals.hide(entry.element);
       const fragment = renderTranslationSections(snapshot, translations, { pending, failed, streaming });
       if (fragment) box.replaceChildren(fragment);
+      updateXLongPostFold(entry.element);
       if (failed.size) {
         const reason = document.createElement('span'); reason.className = 'hnr-translation-failure'; reason.setAttribute('role', 'status');
         reason.textContent = [...new Set(failureReasons.values())].join('；'); box.append(reason);
@@ -297,7 +340,7 @@ export class RedditRuntime {
       const plan = plans[index];
       if (!plan || running.has(index) || entry.completed.has(index) || !current()) return;
       if (!translationBlockNeedsTranslation(plan.text.replace(/⟦\d+⟧/g, ''), true)) { pending.delete(index); render(); return; }
-      running.add(index); failed.delete(index); failureReasons.delete(index); pending.add(index); translations.delete(index);
+      running.add(index); failed.delete(index); failureReasons.delete(index); pending.add(index); if (!previews.has(index)) translations.delete(index);
       if (!statusTimer) {
         startedAt = Date.now(); statusTimer = setInterval(updateStatus, 1000);
         controller.signal.addEventListener('abort', stopStatus, { once: true });
@@ -307,13 +350,13 @@ export class RedditRuntime {
       render();
       try {
         const value = await this.service.section(plan.text, entry.owner, entry.visible ? 'visible' : retry ? 'interactive' : priority, controller.signal, partial => {
-          if (controller.signal.aborted || !box.isConnected) return;
+          if (controller.signal.aborted || !box.isConnected || previews.has(index)) return;
           const first = !streaming.has(index);
           translations.set(index, partial); streaming.add(index);
           if (first) render(); else this.service.worker.render(entry.owner, render);
         }, { before: '', after: '', post: postContext, index, ...(thread ? { thread } : {}) });
         if (!current()) return;
-        streaming.delete(index); entry.completed.set(index, value); translations.set(index, value); pending.delete(index);
+        previews.delete(index); streaming.delete(index); entry.completed.set(index, value); translations.set(index, value); pending.delete(index);
         const key = paragraphKeys[index];
         if (key) {
           if (entry.identity) this.service.cache.set(key, value);
@@ -326,7 +369,7 @@ export class RedditRuntime {
         let message = error instanceof Error ? `${error.name}: ${error.message}` : '未知错误';
         if (this.settings.ai.apiKey) message = message.replaceAll(this.settings.ai.apiKey, '[已隐藏]');
         failureReasons.set(index, message.replace(/https?:\/\/\S+/g, '[服务地址]').slice(0, 180));
-        streaming.delete(index); translations.delete(index); failed.add(index); render();
+        streaming.delete(index); if (!previews.has(index)) translations.delete(index); failed.add(index); render();
       } finally {
         running.delete(index);
         if (!running.size) stopStatus();
@@ -344,6 +387,6 @@ export class RedditRuntime {
     document.removeEventListener('toggle', this.onCommentExpansion, true);
     document.removeEventListener('visibilitychange', this.onVisibility); window.removeEventListener('popstate', this.onRoute);
     for (const entry of this.entries.values()) { this.cancel(entry); entry.learning?.(); entry.originals.restore(); for (const item of entry.inlineBoxes) item.remove(); entry.box?.remove(); }
-    this.entries.clear(); this.completedParagraphs.clear(); this.roots.clear(); this.service.destroy();
+    this.entries.clear(); this.detached.clear(); this.longPosts.destroy(); this.completedParagraphs.clear(); this.roots.clear(); this.service.destroy();
   }
 }

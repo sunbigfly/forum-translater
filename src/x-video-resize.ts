@@ -4,7 +4,7 @@ export class XVideoResize {
   private roots = new Map<HTMLElement, HTMLElement>();
   private cancelDrag: (() => void) | undefined;
   private width = DEFAULT_WIDTH;
-  private contentObservers = new Map<HTMLElement, ResizeObserver>();
+  private contentListeners = new Map<HTMLElement, () => void>();
 
   private fitContent(root: HTMLElement): void {
     root.style.removeProperty('--ft-media-fit-width');
@@ -19,7 +19,7 @@ export class XVideoResize {
   }
 
   private unwatch(root: HTMLElement): void {
-    this.contentObservers.get(root)?.disconnect(); this.contentObservers.delete(root);
+    this.contentListeners.get(root)?.(); this.contentListeners.delete(root);
     root.style.removeProperty('--ft-media-fit-width');
   }
 
@@ -33,10 +33,13 @@ export class XVideoResize {
     const saved: unknown = GM_getValue(this.sizeKey, DEFAULT_WIDTH);
     if (typeof saved === 'number' && Number.isFinite(saved)) this.width = Math.max(180, Math.min(2400, saved));
     this.applyWidth(this.width);
+    if (this.site === 'x' && this.kind === 'video') window.addEventListener('resize', this.refit);
   }
 
   reconcile(mediaRoots?: Iterable<HTMLElement>): void {
     for (const [root, controls] of this.roots) {
+      // X can detach and reuse the feed tree during Post navigation.
+      if (this.site === 'x' && !root.isConnected && root.contains(controls)) continue;
       if (!root.isConnected || !root.contains(controls) || this.kind === 'image' && (root.closest('[data-ft-video-resizable]') || root.querySelector('video,[data-testid="videoPlayer"],[data-testid="videoComponent"]'))) {
         controls.remove(); root.removeAttribute(this.attribute); this.unwatch(root); this.roots.delete(root);
       }
@@ -102,29 +105,37 @@ export class XVideoResize {
         controls.append(handle);
       }
       root.append(controls); this.roots.set(root, controls);
-      if (this.kind === 'video') {
-        const content = root.querySelector('[data-testid="videoPlayer"],video');
-        if (content && typeof ResizeObserver !== 'undefined') {
-          const observer = new ResizeObserver(() => this.fitContent(root));
-          observer.observe(content); this.contentObservers.set(root, observer);
-        }
+      if (this.kind === 'video' && this.site === 'x') {
+        const fit = (): void => this.fitContent(root);
+        // Only external changes trigger fitting. Observing the player's dimensions
+        // while changing its parent's width creates a resize feedback loop.
+        root.addEventListener('loadedmetadata', fit, true);
+        this.contentListeners.set(root, () => root.removeEventListener('loadedmetadata', fit, true));
         this.fitContent(root);
       }
     }
-    for (const [root, controls] of this.roots) if (!desired.has(root)) {
+    for (const [root, controls] of this.roots) if (!desired.has(root) && (this.site !== 'x' || root.isConnected)) {
       controls.remove(); root.removeAttribute(this.attribute); this.unwatch(root); this.roots.delete(root);
+    }
+    const detached = [...this.roots.keys()].filter(root => !root.isConnected);
+    for (const root of detached.slice(0, Math.max(0, detached.length - 50))) {
+      this.roots.get(root)?.remove(); root.removeAttribute(this.attribute); this.unwatch(root); this.roots.delete(root);
     }
   }
 
+  private refit = (): void => { for (const root of this.roots.keys()) if (root.isConnected) this.fitContent(root); };
   private clamp(root: HTMLElement, width: number): number {
     const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
     return Math.max(Math.min(180, available), Math.min(2400, available, width));
   }
   private applyWidth(width: number): void {
-    document.documentElement.style.setProperty(this.widthProperty, `${width}px`);
-    for (const root of this.roots.keys()) this.fitContent(root);
+    const next = `${width}px`;
+    if (document.documentElement.style.getPropertyValue(this.widthProperty) === next) return;
+    document.documentElement.style.setProperty(this.widthProperty, next);
+    this.refit();
   }
   destroy(): void {
+    window.removeEventListener('resize', this.refit);
     this.cancelDrag?.();
     for (const [root, controls] of this.roots) { controls.remove(); root.removeAttribute(this.attribute); this.unwatch(root); }
     this.roots.clear(); document.documentElement.style.removeProperty(this.widthProperty);

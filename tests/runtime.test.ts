@@ -70,7 +70,7 @@ it('paints persisted feed translations in a fresh detail runtime before new para
   const detail = document.querySelector('[data-testid="tweetText"]'); if (!detail) throw new Error('Missing detail');
   Observer.instances[0]?.emit(detail);
   expect(detail.textContent).toContain('已有译文');
-  expect(detail.textContent).not.toContain('截断旧译文');
+  expect(detail.textContent).toContain('截断旧译文');
   expect(pending.mock.calls.map(call => call[0])).toEqual(['Cut off sentence now complete.', 'New paragraph']);
 });
 it('retranslates a completed truncated paragraph when expansion changes its text', async () => {
@@ -345,4 +345,86 @@ it('handles BR paragraph boundaries and hides both translated X paragraphs', asy
   expect([...root.querySelectorAll('[data-ft-original-hidden]')].map(node => node.textContent).join('')).toContain('Second paragraph');
   expect(root.querySelectorAll('[data-ft-owned="translation"]')).toHaveLength(2);
   runtime.destroy(); expect(root.innerHTML).toBe(original);
+});
+
+it('reuses AI translations with vocabulary enabled and replaces expanded previews only on completion', async () => {
+  service.destroy();
+  service = new TranslationService({ ...DEFAULTS, provider: 'ai', vocabulary: true }, new TranslationCache());
+  document.body.innerHTML = '<article data-testid="tweet"><a href="/user/status/456"><time>Now</time></a><div data-testid="tweetText">First paragraph\n\nWe will continue until other</div></article>';
+  const root = document.querySelector<HTMLElement>('[data-testid="tweetText"]'); if (!root) throw new Error('Missing tweet');
+  let complete: ((value: string) => void) | undefined;
+  let reject: ((reason: Error) => void) | undefined;
+  let partial: ((value: string) => void) | undefined;
+  const translate = vi.spyOn(service, 'section').mockResolvedValueOnce('首段译文').mockResolvedValueOnce('我们会继续，直到其他');
+  runtime = new RedditRuntime(service.settings, service); Observer.instances[0]?.emit(root); await settle();
+  expect(service.hasVocabulary('First paragraph')).toBe(false);
+  translate.mockImplementation((text, _owner, _priority, _signal, onPartial) => {
+    if (text === 'New paragraph') return Promise.resolve('新段落译文');
+    partial = onPartial;
+    return new Promise((resolve, fail) => { complete = resolve; reject = fail; });
+  });
+  root.textContent = 'First paragraph\n\nWe will continue until other labs improve.\n\nNew paragraph'; await settle();
+  expect(translate.mock.calls.slice(2).map(call => call[0])).toEqual(['We will continue until other labs improve.', 'New paragraph']);
+  expect(root.textContent).toContain('首段译文'); expect(root.textContent).toContain('我们会继续，直到其他'); expect(root.textContent).toContain('新段落译文');
+  const firstBox = root.querySelector('[data-ft-owned="translation"]');
+  partial?.('新的流式半句'); await settle();
+  expect(root.textContent).not.toContain('新的流式半句'); expect(root.textContent).toContain('我们会继续，直到其他');
+  reject?.(new Error('temporary failure')); await settle();
+  expect(root.textContent).toContain('我们会继续，直到其他');
+  const retry = [...root.querySelectorAll('button')].find(button => button.textContent === '重试本段');
+  expect(retry).toBeDefined(); retry?.click();
+  complete?.('我们会继续这样做，直到其他实验室改进。'); await settle();
+  expect(root.textContent).toContain('我们会继续这样做，直到其他实验室改进。');
+  expect(root.textContent).not.toContain('我们会继续，直到其他');
+  expect(root.querySelector('[data-ft-owned="translation"]')).toBe(firstBox);
+});
+it('does not preview a prefix from another post or for a rewritten paragraph', async () => {
+  document.body.innerHTML = '<article data-testid="tweet"><a href="/user/status/123"><time>Now</time></a><div data-testid="tweetText">Original truncated paragraph</div></article>';
+  const root = document.querySelector<HTMLElement>('[data-testid="tweetText"]'); if (!root) throw new Error('Missing tweet');
+  vi.spyOn(service, 'section').mockResolvedValueOnce('旧帖译文').mockImplementation(() => new Promise(() => {}));
+  runtime = new RedditRuntime({ ...service.settings, vocabulary: false }, service); Observer.instances[0]?.emit(root); await settle();
+  root.textContent = 'Completely rewritten paragraph'; await settle();
+  expect(document.body.textContent).not.toContain('旧帖译文');
+  document.querySelector('a')?.setAttribute('href', '/user/status/999');
+  root.textContent = 'Original truncated paragraph now expanded'; await settle(); Observer.instances[0]?.emit(root); await settle();
+  expect(document.body.textContent).not.toContain('旧帖译文');
+});
+it('retains the same X translation and vocabulary nodes across Post open and close', async () => {
+  const route = { hostname: 'x.com', href: 'https://x.com/home', pathname: '/home' }; vi.stubGlobal('location', route);
+  document.body.innerHTML = '<article data-testid="tweet"><a href="/user/status/123"><time>Now</time></a><div data-testid="tweetText">Original paragraph</div></article>';
+  const translate = vi.spyOn(service, 'section').mockResolvedValue('原有译文'); const reset = vi.spyOn(service, 'resetPending');
+  vi.spyOn(vocabulary, 'collectVocabulary').mockResolvedValue([]);
+  runtime = new RedditRuntime({ ...service.settings, vocabulary: true }, service);
+  const root = document.querySelector('[data-testid="tweetText"]'); if (!root) throw new Error('Missing tweet'); Observer.instances[0]?.emit(root); await settle();
+  const boxes = [...document.querySelectorAll('[data-ft-owned="translation"]')]; const learning = document.querySelector('[data-ft-owned="learning"]'); expect(learning).not.toBeNull();
+  route.href = 'https://x.com/user/status/123'; route.pathname = '/user/status/123'; window.dispatchEvent(new PopStateEvent('popstate')); await settle();
+  route.href = 'https://x.com/home'; route.pathname = '/home'; window.dispatchEvent(new PopStateEvent('popstate')); await settle();
+  expect([...document.querySelectorAll('[data-ft-owned="translation"]')]).toEqual(boxes); expect(document.querySelector('[data-ft-owned="learning"]')).toBe(learning);
+  expect(translate).toHaveBeenCalledOnce(); expect(reset).not.toHaveBeenCalled();
+});
+it('reattaches a completed X feed subtree without removing its translated nodes', async () => {
+  const route = { hostname: 'x.com', href: 'https://x.com/home', pathname: '/home' }; vi.stubGlobal('location', route);
+  document.body.innerHTML = '<article data-testid="tweet"><a href="/user/status/123"><time>Now</time></a><div data-testid="tweetText">Original paragraph</div></article>';
+  const translate = vi.spyOn(service, 'section').mockResolvedValue('保留译文'); runtime = new RedditRuntime({ ...service.settings, vocabulary: false }, service);
+  const article = document.querySelector('article'); const root = document.querySelector('[data-testid="tweetText"]'); if (!article || !root) throw new Error('Missing tweet');
+  Observer.instances[0]?.emit(root); await settle(); const boxes = [...article.querySelectorAll('[data-ft-owned="translation"]')]; expect(boxes.length).toBeGreaterThan(0);
+  article.remove(); route.href = 'https://x.com/user/status/123'; window.dispatchEvent(new PopStateEvent('popstate')); await settle();
+  expect([...article.querySelectorAll('[data-ft-owned="translation"]')]).toEqual(boxes);
+  document.body.append(article); route.href = 'https://x.com/home'; window.dispatchEvent(new PopStateEvent('popstate')); await settle();
+  expect([...article.querySelectorAll('[data-ft-owned="translation"]')]).toEqual(boxes); expect(translate).toHaveBeenCalledOnce();
+});
+
+it('translates the full X note before Show more is opened and does not retranslate on toggle', async () => {
+  document.body.innerHTML = '<article data-testid="tweet"><a href="/user/status/123"><time>Now</time></a><div><div data-testid="tweetText">First paragraph\n\nWe are</div><button data-testid="tweet-text-show-more-link">Show more</button></div></article>';
+  const article = document.querySelector('article'); if (!article) throw new Error('Missing tweet');
+  Object.assign(article, { __reactFiber$test: { memoizedProps: { tweet: { id_str: '123', note_tweet: { text: 'First paragraph\n\nWe are translating the entire hidden remainder.' } } } } });
+  const translate = vi.spyOn(service, 'section').mockResolvedValue('完整译文');
+  runtime = new RedditRuntime({ ...service.settings, vocabulary: false }, service);
+  const body = document.querySelector('[data-ft-long-post] [data-testid="tweetText"]'); if (!body) throw new Error('Missing complete body');
+  Observer.instances[0]?.emit(body); await settle();
+  expect(translate.mock.calls.map(call => call[0])).toEqual(['First paragraph', 'We are translating the entire hidden remainder.']);
+  const button = document.querySelector<HTMLButtonElement>('[data-ft-owned="long-post-toggle"]');
+  expect(button?.getAttribute('aria-expanded')).toBe('false'); expect(body.querySelectorAll('[data-ft-owned="translation"]')).toHaveLength(2);
+  button?.click(); await settle(); expect(translate).toHaveBeenCalledTimes(2);
+  button?.click(); await settle(); expect(translate).toHaveBeenCalledTimes(2);
 });

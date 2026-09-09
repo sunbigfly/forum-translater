@@ -34,6 +34,10 @@ export class TranslationCache {
     cacheHit('translation');
     return item.text;
   }
+  matching(prefix: string): [string, string][] {
+    return [...this.values].filter(([key, entry]) => key.startsWith(prefix) && entry.expires > Date.now())
+      .map(([key, entry]) => [key, entry.text]);
+  }
   set(key: string, text: string): void {
     this.values.delete(key); this.values.set(key, { text, expires: Date.now() + TTL }); this.trim();
     this.timer ??= setTimeout(() => this.flush(), 600);

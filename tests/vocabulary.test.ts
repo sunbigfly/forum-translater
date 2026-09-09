@@ -146,3 +146,82 @@ it('toggles speech off and restores the icon after natural completion', () => {
   utterance?.onend?.call(utterance, {} as SpeechSynthesisEvent);
   expect(button.classList.contains('is-speaking')).toBe(false);
 });
+
+it('translates the displayed long source example once for the popup and expanded row', async () => {
+  const source = 'This model represents a step-function improvement on many benchmarks, and its training is ongoing.';
+  const translated = '该模型在多项基准测试中实现了跨越式提升，目前仍在训练中。';
+  vi.mocked(requestVocabularyText).mockResolvedValue(JSON.stringify([{ ...word, word: 'benchmarks', level: 'CET6', memoryExample: '', memoryMeaning: '不应显示的孤立译文' }]));
+  const service = new TranslationService({ ...DEFAULTS, ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com/v1', apiKey: 'test-only', model: 'test' } }, new TranslationCache());
+  let finish: ((value: string) => void) | undefined;
+  const translate = vi.spyOn(service, 'section').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const original = document.createElement('p'); original.textContent = source;
+  const anchor = document.createElement('div'); document.body.append(original, anchor);
+  const destroy = mountVocabulary(anchor, source, 'https://x.com/home', service, { original, translations: [] });
+  try {
+    await vi.waitFor(() => expect(original.querySelector('[data-ft-word]')).not.toBeNull());
+    expect(translate).not.toHaveBeenCalled();
+    original.querySelector('[data-ft-word]')?.dispatchEvent(new Event('pointerenter'));
+    const popup = document.querySelector('[data-ft-owned="word-popup"]')?.shadowRoot;
+    expect(popup?.querySelector('.example-translation')?.textContent).toBe('例句翻译中…');
+    const learning = document.querySelector('[data-ft-owned="learning"]')?.shadowRoot;
+    learning?.querySelector<HTMLButtonElement>('.word')?.click();
+    expect(translate).toHaveBeenCalledOnce();
+    expect(translate.mock.calls[0]?.[0]).toBe(source);
+    finish?.(translated);
+    await vi.waitFor(() => expect(popup?.querySelector('.example-translation')?.textContent).toBe(translated));
+    expect(learning?.querySelector('.example p:nth-child(2)')?.textContent).toBe(translated);
+    popup?.querySelector<HTMLButtonElement>('[aria-label="收藏单词"]')?.click();
+    expect(readWordbook()[0]?.exampleMeaning).toBe(translated);
+    expect(readWordbook()[0]?.memoryMeaning).toBe('不应显示的孤立译文');
+  } finally { destroy(); translate.mockRestore(); service.destroy(); }
+});
+it('retries a missing memory example translation and aborts it on unmount', async () => {
+  const entry = { ...word, word: 'substantial', level: 'CET6', memoryExample: 'A substantial meal.' };
+  vi.mocked(requestVocabularyText).mockResolvedValue(JSON.stringify([entry]));
+  const service = new TranslationService({ ...DEFAULTS, ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com/v1', apiKey: 'test-only', model: 'test' } }, new TranslationCache());
+  const translate = vi.spyOn(service, 'section').mockRejectedValueOnce(new Error('offline')).mockImplementation(() => new Promise(() => {}));
+  const anchor = document.createElement('div'); document.body.append(anchor);
+  const destroy = mountVocabulary(anchor, 'substantial effort', 'https://x.com/home', service);
+  try {
+    const shadow = document.querySelector('[data-ft-owned="learning"]')?.shadowRoot;
+    await vi.waitFor(() => expect(shadow?.querySelector('.word')).not.toBeNull());
+    shadow?.querySelector<HTMLButtonElement>('.word')?.click();
+    await vi.waitFor(() => expect(shadow?.querySelector('.example')?.textContent).toContain('例句翻译失败'));
+    shadow?.querySelector<HTMLButtonElement>('.example button')?.click();
+    expect(translate).toHaveBeenCalledTimes(2);
+    expect(translate.mock.calls[1]?.[0]).toBe(entry.memoryExample);
+    destroy();
+    expect(translate.mock.calls[1]?.[3].aborted).toBe(true);
+  } finally { destroy(); translate.mockRestore(); service.destroy(); }
+});
+it('refreshes corrected vocabulary at the same count and reapplies marks after original text changes', async () => {
+  const service = new TranslationService({ ...DEFAULTS, provider: 'ai', vocabulary: true }, new TranslationCache());
+  let publish: ((words: VocabularyWord[]) => void) | undefined;
+  const watch = vi.spyOn(service, 'watchVocabulary').mockImplementation((_source, callback) => { publish = callback; return () => {}; });
+  const original = document.createElement('p'); original.textContent = 'substantial coherent';
+  const translated = document.createElement('div'); translated.textContent = '大量的，连贯的，协调的'; document.body.append(original, translated);
+  const destroy = mountVocabulary(translated, original.textContent, 'https://x.com/home', service, { original, translations: [translated] });
+  const first: VocabularyWord = { ...word, word: 'substantial', level: 'CET6', meaning: '大量的', translatedTerm: '大量的', memoryExample: 'A substantial meal.', memoryMeaning: '一顿丰盛的饭。' };
+  try {
+    await vi.waitFor(() => expect(publish).toBeTypeOf('function'));
+    publish?.([first]);
+    const shadow = document.querySelector('[data-ft-owned="learning"]')?.shadowRoot;
+    expect(original.querySelector('[data-ft-word]')?.textContent).toBe('substantial');
+    const revised = { ...first, word: 'coherent', meaning: '连贯的', translatedTerm: '连贯的' };
+    publish?.([revised]);
+    expect(shadow?.querySelectorAll('.word-row')).toHaveLength(1);
+    expect(shadow?.querySelector('.word')?.textContent).toBe('coherent');
+    expect(original.querySelector('[data-ft-word]')?.textContent).toBe('coherent');
+    expect(translated.querySelector('[data-ft-word]')?.textContent).toBe('连贯的');
+    shadow?.querySelector<HTMLButtonElement>('.word')?.click();
+    publish?.([{ ...revised, translatedTerm: '协调的', memoryMeaning: '更新后的例句译文。' }]);
+    expect(shadow?.querySelector<HTMLElement>('.example')?.hidden).toBe(false);
+    expect(shadow?.querySelector('.example')?.textContent).toContain('更新后的例句译文。');
+    expect(translated.querySelector('[data-ft-word]')?.textContent).toBe('协调的');
+    original.textContent = 'COHERENT';
+    await vi.waitFor(() => expect(original.querySelector('[data-ft-word]')?.textContent).toBe('COHERENT'));
+    publish?.([]);
+    expect(original.querySelector('[data-ft-word]')).toBeNull(); expect(translated.querySelector('[data-ft-word]')).toBeNull();
+    expect(shadow?.querySelectorAll('.word-row')).toHaveLength(0);
+  } finally { destroy(); watch.mockRestore(); service.destroy(); }
+});

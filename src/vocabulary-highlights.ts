@@ -19,14 +19,17 @@ export class VocabularyHighlights {
   private original: HTMLElement | undefined;
   private translations: HTMLElement[] = [];
   private identities: string[] = [];
+  private texts: (string | null)[] = [];
   constructor(private readonly show?: (anchor: HTMLElement, word: VocabularyWord) => () => void) {}
   apply(original: HTMLElement, translations: HTMLElement[], words: VocabularyWord[]): void {
-    const identities = words.map(word => JSON.stringify([word.word, word.meaning, word.translatedTerm]));
+    const identities = words.map(word => JSON.stringify(word));
+    const texts = [original, ...translations].map(node => node.textContent);
     const append = this.original === original && translations.length === this.translations.length && translations.every((node, index) => node === this.translations[index])
+      && texts.length === this.texts.length && texts.every((value, index) => value === this.texts[index])
       && this.identities.length <= identities.length && this.identities.every((value, index) => value === identities[index]) && this.marks.every(mark => mark.isConnected);
     const start = append ? this.identities.length : 0;
     if (!append) this.clear();
-    this.original = original; this.translations = [...translations]; this.identities = identities;
+    this.original = original; this.translations = [...translations]; this.identities = identities; this.texts = texts;
     for (const [index, word] of words.entries()) {
       if (index < start) continue;
       this.mark(original, word.word, word.meaning, true, word, index);
@@ -60,5 +63,5 @@ export class VocabularyHighlights {
       }
     }
   }
-  clear(): void { this.dismiss?.(); this.dismiss = undefined; for (const mark of this.marks) mark.replaceWith(...mark.childNodes); this.marks = []; this.original = undefined; this.translations = []; this.identities = []; }
+  clear(): void { this.dismiss?.(); this.dismiss = undefined; for (const mark of this.marks) mark.replaceWith(...mark.childNodes); this.marks = []; this.original = undefined; this.translations = []; this.identities = []; this.texts = []; }
 }

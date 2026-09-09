@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.2
+// @version      0.2.3
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -2097,14 +2097,17 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     original;
     translations = [];
     identities = [];
+    texts = [];
     apply(original2, translations, words2) {
-      const identities = words2.map((word) => JSON.stringify([word.word, word.meaning, word.translatedTerm]));
-      const append = this.original === original2 && translations.length === this.translations.length && translations.every((node2, index) => node2 === this.translations[index]) && this.identities.length <= identities.length && this.identities.every((value, index) => value === identities[index]) && this.marks.every((mark) => mark.isConnected);
+      const identities = words2.map((word) => JSON.stringify(word));
+      const texts = [original2, ...translations].map((node2) => node2.textContent);
+      const append = this.original === original2 && translations.length === this.translations.length && translations.every((node2, index) => node2 === this.translations[index]) && texts.length === this.texts.length && texts.every((value, index) => value === this.texts[index]) && this.identities.length <= identities.length && this.identities.every((value, index) => value === identities[index]) && this.marks.every((mark) => mark.isConnected);
       const start = append ? this.identities.length : 0;
       if (!append) this.clear();
       this.original = original2;
       this.translations = [...translations];
       this.identities = identities;
+      this.texts = texts;
       for (const [index, word] of words2.entries()) {
         if (index < start) continue;
         this.mark(original2, word.word, word.meaning, true, word, index);
@@ -2157,6 +2160,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.original = void 0;
       this.translations = [];
       this.identities = [];
+      this.texts = [];
     }
   };
 
@@ -2201,7 +2205,48 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     node2.append(svg);
     return node2;
   }
-  function wordDetails(word, status) {
+  var exampleOwner = 0;
+  function exampleText(word) {
+    return word.memoryExample?.trim() || word.example;
+  }
+  function exampleMeaning(word) {
+    return (word.memoryExample?.trim() ? word.memoryMeaning : word.exampleMeaning)?.trim() ?? "";
+  }
+  function createExampleLoader(service, signal) {
+    const requests = /* @__PURE__ */ new Map();
+    const load = (word, target) => {
+      const existing = exampleMeaning(word);
+      if (existing) {
+        target.textContent = existing;
+        return;
+      }
+      target.textContent = "例句翻译中…";
+      const text2 = exampleText(word);
+      let request = requests.get(text2);
+      if (!request) {
+        const owner = `vocabulary-example:${++exampleOwner}`;
+        request = service.section(text2, owner, "visible", signal).then((value) => {
+          if (!value.trim()) throw new Error("Empty example translation");
+          return value;
+        }).finally(() => service.release(owner));
+        requests.set(text2, request);
+        void request.catch(() => {
+          requests.delete(text2);
+        });
+      }
+      void request.then((value) => {
+        if (signal.aborted) return;
+        if (word.memoryExample?.trim()) word.memoryMeaning = value;
+        else word.exampleMeaning = value;
+        if (target.isConnected) target.textContent = value;
+      }).catch(() => {
+        if (signal.aborted || !target.isConnected) return;
+        target.replaceChildren("例句翻译失败，", button("重试", () => load(word, target)));
+      });
+    };
+    return load;
+  }
+  function wordDetails(word, status, loadExample) {
     const card = document.createElement("div");
     card.className = "word-card";
     const heading = document.createElement("strong");
@@ -2211,12 +2256,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     const meaning = document.createElement("p");
     meaning.textContent = word.meaning;
     const example = document.createElement("p");
-    example.textContent = word.memoryExample ? `${word.memoryExample}
-${word.memoryMeaning ?? ""}` : word.example;
-    card.append(heading, soundButton(word, status), pronunciation, meaning, example);
+    example.textContent = exampleText(word);
+    const translation = document.createElement("p");
+    translation.className = "example-translation";
+    translation.textContent = exampleMeaning(word) || "暂无例句翻译";
+    if (loadExample) loadExample(word, translation);
+    card.append(heading, soundButton(word, status), pronunciation, meaning, example, translation);
     return card;
   }
-  function showWordPopup(anchor, word, sourceUrl) {
+  function showWordPopup(anchor, word, sourceUrl, loadExample) {
     const host = document.createElement("div");
     host.dataset.ftOwned = "word-popup";
     host.style.cssText = "position:fixed;z-index:2147483647;width:min(300px,calc(100vw - 16px));";
@@ -2224,7 +2272,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
     const style = document.createElement("style");
     style.textContent = `
     :host{color-scheme:light dark;font:13px/1.5 system-ui,sans-serif;color:CanvasText}
-    section{background:Canvas;border:1px solid #8884;border-radius:10px;padding:12px;box-shadow:0 6px 24px #0002;overflow-wrap:anywhere}
+    section{max-height:calc(100vh - 40px);overflow-y:auto;background:Canvas;border:1px solid #8884;border-radius:10px;padding:12px;box-shadow:0 6px 24px #0002;overflow-wrap:anywhere}
     strong{font-size:15px}p{margin:6px 0;white-space:pre-wrap}span{color:#888}
     button{font:inherit;color:inherit;background:none;border:0;padding:4px;cursor:pointer}button:hover{background:#8882;border-radius:4px}
     .icon{display:inline-flex;vertical-align:middle}[role=status]:empty{display:none}
@@ -2244,16 +2292,22 @@ ${word.memoryMeaning ?? ""}` : word.example;
       }
     });
     add.setAttribute("aria-label", "收藏单词");
-    section.append(wordDetails(word, status), add, status);
+    section.append(wordDetails(word, status, loadExample), add, status);
     shadow.append(style, section);
     document.body.append(host);
-    const rect = anchor.getBoundingClientRect();
-    const height = host.getBoundingClientRect().height;
-    host.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - host.getBoundingClientRect().width - 8))}px`;
-    host.style.top = `${Math.max(8, Math.min(rect.bottom + 6, innerHeight - height - 8))}px`;
+    const position = () => {
+      const rect = anchor.getBoundingClientRect();
+      const height = host.getBoundingClientRect().height;
+      host.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - host.getBoundingClientRect().width - 8))}px`;
+      host.style.top = `${Math.max(8, Math.min(rect.bottom + 6, innerHeight - height - 8))}px`;
+    };
+    position();
+    const resize = typeof ResizeObserver === "undefined" ? void 0 : new ResizeObserver(position);
+    resize?.observe(host);
     let timer;
     const close = () => {
       clearTimeout(timer);
+      resize?.disconnect();
       stopWordSpeech(shadow);
       host.remove();
       anchor.removeEventListener("pointerleave", leave);
@@ -2330,13 +2384,15 @@ ${word.memoryMeaning ?? ""}` : word.example;
       }
     });
     visibility?.observe(observed);
-    const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl));
+    const loadExample = createExampleLoader(service, controller.signal);
+    const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl, loadExample));
     let currentWords = [];
     const observeTranslations = () => {
+      if (targets) translationObserver.observe(targets.original, { childList: true, characterData: true, subtree: true });
       for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true });
     };
     const refreshHighlights = () => {
-      if (!targets || controller.signal.aborted || !currentWords.length) return;
+      if (!targets || controller.signal.aborted) return;
       translationObserver.disconnect();
       highlights.clear();
       highlights.apply(targets.original, targets.translations, currentWords);
@@ -2358,6 +2414,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
       highlights.clear();
       section.setAttribute("aria-busy", "true");
       let displayed = cards.children.length;
+      let displayedWords = [];
       let expanded = false;
       const more = button("", () => {
         expanded = !expanded;
@@ -2370,7 +2427,17 @@ ${word.memoryMeaning ?? ""}` : word.example;
       more.className = "more";
       more.setAttribute("aria-expanded", "false");
       const fill = (result) => {
-        if (controller.signal.aborted || result.length <= displayed) return;
+        if (controller.signal.aborted) return;
+        const identities = result.map((word) => JSON.stringify(word));
+        if (identities.length === displayedWords.length && identities.every((value, index) => value === displayedWords[index])) return;
+        const openWords = new Set([...cards.querySelectorAll('.word[aria-expanded="true"]')].map((node2) => node2.textContent));
+        const append = displayedWords.length <= identities.length && displayedWords.every((value, index) => value === identities[index]);
+        if (!append) {
+          stopWordSpeech(shadow);
+          cards.replaceChildren();
+          displayed = 0;
+        }
+        displayedWords = identities;
         for (const [index, word] of result.entries()) {
           if (index < displayed) continue;
           const card = document.createElement("div");
@@ -2381,7 +2448,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
           example.className = "example";
           example.hidden = true;
           const sentence = document.createElement("p");
-          const text2 = word.memoryExample ?? word.example;
+          const text2 = exampleText(word);
           const escapedWord = word.word.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           let offset = 0;
           if (escapedWord) for (const match of text2.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_])${escapedWord}(?![\\p{L}\\p{N}_])`, "giu"))) {
@@ -2394,8 +2461,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
           }
           sentence.append(text2.slice(offset));
           const explanation = document.createElement("p");
-          const translatedExample = word.memoryMeaning ?? "";
-          const translatedTerm = word.memoryTerm?.trim() ?? "";
+          const translatedExample = exampleMeaning(word);
+          const translatedTerm = word.memoryExample?.trim() ? word.memoryTerm?.trim() ?? "" : "";
           const termIndex = translatedTerm ? translatedExample.indexOf(translatedTerm) : -1;
           if (termIndex >= 0) {
             const marked = document.createElement("u");
@@ -2406,6 +2473,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
           example.append(sentence, explanation);
           const toggleDetails = () => {
             example.hidden = !example.hidden;
+            if (!example.hidden && !translatedExample) loadExample(word, explanation);
             label.setAttribute("aria-expanded", String(!example.hidden));
           };
           const label = button(word.word, toggleDetails);
@@ -2452,13 +2520,14 @@ ${word.memoryMeaning ?? ""}` : word.example;
           add.append(bookmark);
           row.append(label, add, pronunciation, soundButton(word, status), meaning);
           cards.append(card);
+          if (openWords.has(word.word)) toggleDetails();
         }
         displayed = result.length;
         if (displayed > 3) {
           more.textContent = expanded ? "收起" : `展开其余 ${displayed - 3} 词`;
           if (!more.isConnected) actions.append(more);
-        }
-        host.hidden = false;
+        } else more.remove();
+        host.hidden = result.length === 0;
         currentWords = result;
         refreshHighlights();
       };
@@ -2559,6 +2628,144 @@ ${word.memoryMeaning ?? ""}` : word.example;
     });
     return { snapshot, ranges, separators };
   }
+
+  // src/x-long-posts.ts
+  var object = (value) => value !== null && typeof value === "object" ? value : void 0;
+  function tweetData(root, id) {
+    const article = root.closest('article[data-testid="tweet"]');
+    for (let node2 = root; node2 && article?.contains(node2); node2 = node2.parentElement) {
+      const key = Object.keys(node2).find((name) => name.startsWith("__reactFiber$"));
+      let fiber = object(key ? node2[key] : void 0);
+      for (let depth = 0; fiber && depth < 30; depth++, fiber = object(fiber.return)) {
+        const tweet = object(object(fiber.memoizedProps)?.tweet);
+        if (tweet && (tweet.id_str === id || tweet.rest_id === id)) return tweet;
+      }
+    }
+  }
+  function fullPostText(root) {
+    const id = contentIdentity(root).replace(/^x:status:/, "");
+    if (!/^\d+$/.test(id)) return;
+    const tweet = tweetData(root, id);
+    const note = object(tweet?.note_tweet);
+    const result = object(object(note?.note_tweet_results)?.result);
+    const text2 = note?.text ?? result?.text;
+    if (typeof text2 !== "string" || !text2.trim()) return;
+    return text2;
+  }
+  var pendingFolds = /* @__PURE__ */ new WeakSet();
+  function updateXLongPostFold(element) {
+    const viewport = element.closest(".ft-long-post-viewport");
+    if (!viewport || pendingFolds.has(viewport)) return;
+    pendingFolds.add(viewport);
+    requestAnimationFrame(() => {
+      pendingFolds.delete(viewport);
+      if (!viewport.isConnected) return;
+      const frame = viewport.getBoundingClientRect();
+      if (frame.width <= 0) return;
+      const top = frame.top;
+      const limit = top + 320;
+      let bottom = top;
+      let contentBottom = top;
+      for (const box of viewport.querySelectorAll('[data-ft-owned="translation"]')) {
+        if (box.hidden) continue;
+        const rect = box.getBoundingClientRect();
+        if (rect.height > 0) contentBottom = Math.max(contentBottom, rect.bottom);
+        if (rect.height > 0 && rect.bottom <= limit) bottom = Math.max(bottom, rect.bottom);
+      }
+      const walker = document.createTreeWalker(viewport, NodeFilter.SHOW_TEXT);
+      for (let node2 = walker.nextNode(); node2; node2 = walker.nextNode()) {
+        if (!node2.textContent?.trim() || node2.parentElement?.closest('[data-ft-owned="translation"],[data-ft-original-hidden]')) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node2);
+        for (const rect of range.getClientRects()) {
+          if (rect.height > 0) contentBottom = Math.max(contentBottom, rect.bottom);
+          if (rect.height > 0 && rect.bottom <= limit) bottom = Math.max(bottom, rect.bottom);
+        }
+      }
+      const height = Math.max(0, Math.ceil(bottom - top));
+      const overflowing = contentBottom - top > height + 1;
+      const value = overflowing ? `${height}px` : "none";
+      if (viewport.style.getPropertyValue("--ft-long-post-height") !== value) viewport.style.setProperty("--ft-long-post-height", value);
+      const ellipsis = viewport.nextElementSibling;
+      if (ellipsis instanceof HTMLElement) ellipsis.hidden = !overflowing;
+      const button2 = viewport.parentElement?.querySelector(':scope > [data-ft-owned="long-post-toggle"]');
+      if (button2) button2.hidden = !overflowing;
+    });
+  }
+  var XLongPosts = class {
+    posts = /* @__PURE__ */ new Map();
+    constructor() {
+      window.addEventListener("resize", this.resize);
+    }
+    resize = () => {
+      for (const post of this.posts.values()) updateXLongPostFold(post.body);
+    };
+    prepare(source) {
+      if (!source.matches('[data-testid="tweetText"]') || source.closest("[data-ft-long-post]")) return source;
+      const existing = this.posts.get(source);
+      const signature = sourceSnapshot(source).innerHTML;
+      const identity = contentIdentity(source);
+      if (existing) {
+        if (signature === existing.signature && identity === existing.identity && existing.wrapper.isConnected) return existing.body;
+        this.remove(existing);
+      }
+      const article = source.closest('article[data-testid="tweet"]');
+      if (article?.querySelector('[data-testid="tweetText"]') !== source) return source;
+      const more = source.parentElement?.querySelector(':scope > [data-testid="tweet-text-show-more-link"]');
+      if (!more) return source;
+      const text2 = fullPostText(source);
+      if (!text2) return source;
+      const wrapper = document.createElement("div");
+      wrapper.dataset.ftLongPost = "";
+      const viewport = document.createElement("div");
+      viewport.className = "ft-long-post-viewport";
+      const body = document.createElement("div");
+      body.dataset.testid = "tweetText";
+      body.lang = source.lang;
+      body.textContent = text2;
+      const button2 = document.createElement("button");
+      button2.type = "button";
+      button2.dataset.ftOwned = "long-post-toggle";
+      button2.textContent = "Show more";
+      button2.setAttribute("aria-expanded", "false");
+      button2.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const expanded = wrapper.toggleAttribute("data-expanded");
+        button2.setAttribute("aria-expanded", String(expanded));
+        button2.textContent = expanded ? "Show less" : "Show more";
+      };
+      const ellipsis = document.createElement("div");
+      ellipsis.dataset.ftOwned = "long-post-ellipsis";
+      ellipsis.textContent = "…";
+      ellipsis.setAttribute("aria-hidden", "true");
+      viewport.append(body);
+      wrapper.append(viewport, ellipsis, button2);
+      source.after(wrapper);
+      updateXLongPostFold(body);
+      source.setAttribute("data-ft-long-source", "");
+      more.setAttribute("data-ft-long-more", "");
+      this.posts.set(source, { source, body, wrapper, more, signature, identity });
+      return body;
+    }
+    reconcile() {
+      for (const post of this.posts.values()) {
+        if (post.source.isConnected !== post.wrapper.isConnected || post.source.parentElement !== post.wrapper.parentElement) this.remove(post);
+      }
+      const detached = [...this.posts.values()].filter((post) => !post.source.isConnected);
+      for (const post of detached.slice(0, Math.max(0, detached.length - 50))) this.remove(post);
+    }
+    remove(post) {
+      post.source.removeAttribute("data-ft-long-source");
+      post.more.removeAttribute("data-ft-long-more");
+      post.wrapper.remove();
+      this.posts.delete(post.source);
+    }
+    destroy() {
+      window.removeEventListener("resize", this.resize);
+      for (const post of this.posts.values()) this.remove(post);
+    }
+  };
 
   // src/feed-deduplicator.ts
   var MARKER = "data-ft-duplicate";
@@ -3262,6 +3469,9 @@ ${word.memoryMeaning ?? ""}` : word.example;
       cacheHit("translation");
       return item.text;
     }
+    matching(prefix) {
+      return [...this.values].filter(([key, entry]) => key.startsWith(prefix) && entry.expires > Date.now()).map(([key, entry]) => [key, entry.text]);
+    }
     set(key, text2) {
       this.values.delete(key);
       this.values.set(key, { text: text2, expires: Date.now() + TTL });
@@ -3532,6 +3742,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
       this.reconcile();
     }
     entries = /* @__PURE__ */ new Map();
+    longPosts = new XLongPosts();
+    detached = /* @__PURE__ */ new Map();
     completedParagraphs = /* @__PURE__ */ new Map();
     nearObserver;
     visibleObserver;
@@ -3578,6 +3790,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
       this.service.setForeground(first?.owner);
     }
     remove(entry) {
+      this.detached.delete(entry);
       entry.learning?.();
       entry.learning = null;
       this.cancel(entry);
@@ -3591,21 +3804,41 @@ ${word.memoryMeaning ?? ""}` : word.example;
     }
     reconcile() {
       if (this.destroyed) return;
+      this.longPosts.reconcile();
       this.feed.reconcile();
       if (this.route !== location.href) {
         this.tabTitle.reset();
         this.route = location.href;
         this.translationOnly = loadTranslationOnly();
-        for (const entry of this.entries.values()) this.remove(entry);
-        this.service.resetPending();
+        if (!isXSite()) {
+          for (const entry of this.entries.values()) this.remove(entry);
+          this.service.resetPending();
+        }
         this.roots.clear();
         this.roots.add(document);
       }
-      for (const entry of this.entries.values()) if (!entry.element.isConnected) this.remove(entry);
+      for (const entry of this.entries.values()) {
+        if (entry.element.isConnected) {
+          this.detached.delete(entry);
+          continue;
+        }
+        if (isXSite() && entry.state === "done") {
+          const since = this.detached.get(entry) ?? Date.now();
+          this.detached.set(entry, since);
+          if (Date.now() - since < 6e4) continue;
+        }
+        this.remove(entry);
+      }
+      while (this.detached.size > 50) {
+        const oldest = this.detached.keys().next().value;
+        if (oldest) this.remove(oldest);
+      }
       for (const root of this.roots) {
         if (root instanceof Element && !root.isConnected) continue;
-        for (const { element, kind } of discover(root)) {
+        for (const candidate of discover(root)) {
+          const { kind } = candidate;
           if (!this.settings[kind]) continue;
+          const element = this.longPosts.prepare(candidate.element);
           const snapshot = sourceSnapshot(element);
           const signature = snapshot.innerHTML;
           const identity = contentIdentity(element);
@@ -3692,14 +3925,37 @@ ${word.memoryMeaning ?? ""}` : word.example;
         return `paragraph:v1:${JSON.stringify([this.settings.provider, ai ? [ai.baseUrl.replace(/\/+$/, ""), ai.model, ai.prompt, TRANSLATION_PROMPT_VERSION, this.settings.vocabulary] : null, entry.identity || `node:${entry.owner}`, entry.kind, plan.text, protectedNodes])}`;
       });
       const postContext = plans.map((item) => item.text).join("\n\n").slice(0, 24e3);
+      const previews = /* @__PURE__ */ new Map();
+      const previous = entry.identity ? new Map([...this.service.cache.matching("paragraph:v1:"), ...this.completedParagraphs]) : /* @__PURE__ */ new Map();
       plans.forEach((plan) => {
         const key = paragraphKeys[plan.index] ?? "";
         const cached = this.completedParagraphs.get(key) ?? (entry.identity ? this.service.cache.get(key) : void 0);
-        if (cached !== void 0 && (!ai || !this.settings.vocabulary || this.service.hasVocabulary(postContext))) entry.completed.set(plan.index, cached);
+        if (cached !== void 0) {
+          entry.completed.set(plan.index, cached);
+          return;
+        }
+        let longest = 0;
+        for (const [oldKey, value] of previous) {
+          if (!oldKey.startsWith("paragraph:v1:")) continue;
+          try {
+            const parsed = JSON.parse(oldKey.slice("paragraph:v1:".length));
+            if (!Array.isArray(parsed)) continue;
+            const parts = parsed;
+            const source = parts[4];
+            if (typeof source !== "string" || !Array.isArray(parts[5]) || parts[5].length) continue;
+            const prefix = source.replace(/(?:\.{3}|…)\s*$/, "").trimEnd();
+            if (!prefix || prefix.length <= longest || plan.text.length <= prefix.length || !plan.text.startsWith(prefix)) continue;
+            parts[4] = plan.text;
+            if (`paragraph:v1:${JSON.stringify(parts)}` !== key) continue;
+            longest = prefix.length;
+            previews.set(plan.index, value);
+          } catch {
+          }
+        }
       });
       const thread = redditContext(entry.element, entry.kind);
-      const translations = new Map(entry.completed);
-      const pending = new Set(plans.filter((plan) => !translations.has(plan.index)).map((plan) => plan.index));
+      const translations = new Map([...previews, ...entry.completed]);
+      const pending = new Set(plans.filter((plan) => !entry.completed.has(plan.index)).map((plan) => plan.index));
       const failed = /* @__PURE__ */ new Set();
       const failureReasons = /* @__PURE__ */ new Map();
       const streaming = /* @__PURE__ */ new Set();
@@ -3782,7 +4038,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
         if (entry.kind === "body" && this.settings.vocabulary && !entry.learning) {
           const owner = entry.element.closest('article[data-testid="tweet"],shreddit-post,.thing.link,[data-testid="post-container"]');
           const permalink = owner?.querySelector("time")?.closest("a")?.getAttribute("href") ?? owner?.getAttribute("permalink") ?? owner?.querySelector('a[href*="/comments/"]')?.getAttribute("href") ?? location.href;
-          entry.learning = mountVocabulary(box, postContext, new URL(permalink, location.href).href, this.service, { original: entry.element, translations: entry.inlineBoxes.length ? entry.inlineBoxes : [box] });
+          const learningAnchor = entry.element.closest("[data-ft-long-post]")?.querySelector(':scope > [data-ft-owned="long-post-toggle"]') ?? box;
+          entry.learning = mountVocabulary(learningAnchor, postContext, new URL(permalink, location.href).href, this.service, { original: entry.element, translations: entry.inlineBoxes.length ? entry.inlineBoxes : [box] });
         }
         if (inline) {
           for (const plan of plans) {
@@ -3807,24 +4064,26 @@ ${word.memoryMeaning ?? ""}` : word.example;
               status.className = failed.has(plan.index) ? "hnr-translation-failure" : "hnr-translation-placeholder";
               if (failed.has(plan.index)) status.textContent = `翻译失败：${failureReasons.get(plan.index) ?? "未知错误"}（已保留原文）`;
               target.replaceChildren(status);
-              if (failed.has(plan.index)) {
-                const retry = document.createElement("button");
-                retry.type = "button";
-                retry.textContent = "重试本段";
-                retry.onclick = (event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  void run(plan.index, true);
-                };
-                target.append(retry);
-              }
-            } else target.replaceChildren();
+            }
+            if (failed.has(plan.index)) {
+              const retry = document.createElement("button");
+              retry.type = "button";
+              retry.textContent = "重试本段";
+              retry.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void run(plan.index, true);
+              };
+              target.append(retry);
+            } else if (value === void 0 && !pending.has(plan.index)) target.replaceChildren();
           }
+          updateXLongPostFold(entry.element);
           return;
         }
         if (this.translationOnly && pending.size === 0 && failed.size === 0) entry.originals.hide(entry.element);
         const fragment = renderTranslationSections(snapshot, translations, { pending, failed, streaming });
         if (fragment) box.replaceChildren(fragment);
+        updateXLongPostFold(entry.element);
         if (failed.size) {
           const reason = document.createElement("span");
           reason.className = "hnr-translation-failure";
@@ -3856,7 +4115,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
         failed.delete(index);
         failureReasons.delete(index);
         pending.add(index);
-        translations.delete(index);
+        if (!previews.has(index)) translations.delete(index);
         if (!statusTimer) {
           startedAt = Date.now();
           statusTimer = setInterval(updateStatus, 1e3);
@@ -3868,7 +4127,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
         render();
         try {
           const value = await this.service.section(plan.text, entry.owner, entry.visible ? "visible" : retry ? "interactive" : priority, controller.signal, (partial) => {
-            if (controller.signal.aborted || !box.isConnected) return;
+            if (controller.signal.aborted || !box.isConnected || previews.has(index)) return;
             const first = !streaming.has(index);
             translations.set(index, partial);
             streaming.add(index);
@@ -3876,6 +4135,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
             else this.service.worker.render(entry.owner, render);
           }, { before: "", after: "", post: postContext, index, ...thread ? { thread } : {} });
           if (!current()) return;
+          previews.delete(index);
           streaming.delete(index);
           entry.completed.set(index, value);
           translations.set(index, value);
@@ -3898,7 +4158,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
           if (this.settings.ai.apiKey) message = message.replaceAll(this.settings.ai.apiKey, "[已隐藏]");
           failureReasons.set(index, message.replace(/https?:\/\/\S+/g, "[服务地址]").slice(0, 180));
           streaming.delete(index);
-          translations.delete(index);
+          if (!previews.has(index)) translations.delete(index);
           failed.add(index);
           render();
         } finally {
@@ -3939,6 +4199,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
         entry.box?.remove();
       }
       this.entries.clear();
+      this.detached.clear();
+      this.longPosts.destroy();
       this.completedParagraphs.clear();
       this.roots.clear();
       this.service.destroy();
@@ -4392,6 +4654,85 @@ ${word.memoryMeaning ?? ""}` : word.example;
     };
   }
 
+  // src/x-post-viewport.ts
+  var route = () => `${location.pathname}${location.search ?? ""}`;
+  function postId(article) {
+    const timestamp = article.querySelector('a[href*="/status/"]:has(time)');
+    const link2 = timestamp ?? article.querySelector('a[href*="/status/"]');
+    return /\/status\/(\d+)/.exec(link2?.getAttribute("href") ?? "")?.[1];
+  }
+  var XPostViewport = class {
+    snapshot;
+    timer;
+    constructor() {
+      document.addEventListener("click", this.capture, true);
+      window.addEventListener("wheel", this.cancel, { passive: true });
+      window.addEventListener("touchstart", this.cancel, { passive: true });
+      window.addEventListener("pointerdown", this.cancel, { passive: true });
+      window.addEventListener("keydown", this.onKey, true);
+      window.addEventListener("resize", this.cancel);
+    }
+    capture = (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const article = target?.closest('article[data-testid="tweet"]');
+      if (!article || target?.closest('[data-ft-owned],button,[role="button"],input,textarea,video')) return;
+      const link2 = target?.closest("a");
+      if (link2 && !/^\/[^/]+\/status\/\d+\/?$/.test(link2.getAttribute("href") ?? "")) return;
+      this.cancel();
+      const anchor = postId(article);
+      const rect = article.getBoundingClientRect();
+      if (!anchor || rect.height <= 0 || rect.bottom <= 0 || rect.top >= innerHeight) return;
+      this.snapshot = { route: route(), width: innerWidth, anchor, top: rect.top };
+    };
+    restore() {
+      const snapshot = this.snapshot;
+      if (!snapshot || snapshot.route === route() || snapshot.width !== innerWidth) return;
+      this.cancel();
+      this.snapshot = void 0;
+      const deadline = Date.now() + 2e3;
+      const findAnchor = () => [...document.querySelectorAll('[data-testid="primaryColumn"] article[data-testid="tweet"]')].find((node2) => postId(node2) === snapshot.anchor);
+      const waitForFeed = () => {
+        if (innerWidth !== snapshot.width || Date.now() >= deadline) {
+          this.cancel();
+          return;
+        }
+        if (route() !== snapshot.route || !findAnchor()) {
+          this.timer = setTimeout(waitForFeed, 100);
+          return;
+        }
+        this.timer = setTimeout(() => {
+          this.timer = void 0;
+          if (route() !== snapshot.route || innerWidth !== snapshot.width) return;
+          const anchor = findAnchor();
+          if (!anchor) return;
+          const rect = anchor.getBoundingClientRect();
+          if (rect.height <= 0) return;
+          const delta = rect.top - snapshot.top;
+          if (Math.abs(delta) > 1) window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: "instant" });
+        }, 200);
+      };
+      this.timer = setTimeout(waitForFeed, 0);
+    }
+    cancel = () => {
+      clearTimeout(this.timer);
+      this.timer = void 0;
+    };
+    onKey = (event) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) this.cancel();
+    };
+    destroy() {
+      this.cancel();
+      this.snapshot = void 0;
+      document.removeEventListener("click", this.capture, true);
+      window.removeEventListener("wheel", this.cancel);
+      window.removeEventListener("touchstart", this.cancel);
+      window.removeEventListener("pointerdown", this.cancel);
+      window.removeEventListener("keydown", this.onKey, true);
+      window.removeEventListener("resize", this.cancel);
+    }
+  };
+
   // src/x-ads.ts
   function isXAd(article) {
     const candidates = article.querySelectorAll('[data-testid="promotedIndicator"],span');
@@ -4436,11 +4777,12 @@ ${word.memoryMeaning ?? ""}` : word.example;
       const saved = GM_getValue(this.sizeKey, DEFAULT_WIDTH);
       if (typeof saved === "number" && Number.isFinite(saved)) this.width = Math.max(180, Math.min(2400, saved));
       this.applyWidth(this.width);
+      if (this.site === "x" && this.kind === "video") window.addEventListener("resize", this.refit);
     }
     roots = /* @__PURE__ */ new Map();
     cancelDrag;
     width = DEFAULT_WIDTH;
-    contentObservers = /* @__PURE__ */ new Map();
+    contentListeners = /* @__PURE__ */ new Map();
     fitContent(root) {
       root.style.removeProperty("--ft-media-fit-width");
       if (document.fullscreenElement || this.kind !== "video" || this.site !== "x") return;
@@ -4454,8 +4796,8 @@ ${word.memoryMeaning ?? ""}` : word.example;
       root.style.setProperty("--ft-media-fit-width", `${Math.ceil(content.width + border)}px`);
     }
     unwatch(root) {
-      this.contentObservers.get(root)?.disconnect();
-      this.contentObservers.delete(root);
+      this.contentListeners.get(root)?.();
+      this.contentListeners.delete(root);
       root.style.removeProperty("--ft-media-fit-width");
     }
     sizeKey;
@@ -4463,6 +4805,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
     attribute;
     reconcile(mediaRoots) {
       for (const [root, controls] of this.roots) {
+        if (this.site === "x" && !root.isConnected && root.contains(controls)) continue;
         if (!root.isConnected || !root.contains(controls) || this.kind === "image" && (root.closest("[data-ft-video-resizable]") || root.querySelector('video,[data-testid="videoPlayer"],[data-testid="videoComponent"]'))) {
           controls.remove();
           root.removeAttribute(this.attribute);
@@ -4548,32 +4891,42 @@ ${word.memoryMeaning ?? ""}` : word.example;
         }
         root.append(controls);
         this.roots.set(root, controls);
-        if (this.kind === "video") {
-          const content = root.querySelector('[data-testid="videoPlayer"],video');
-          if (content && typeof ResizeObserver !== "undefined") {
-            const observer = new ResizeObserver(() => this.fitContent(root));
-            observer.observe(content);
-            this.contentObservers.set(root, observer);
-          }
+        if (this.kind === "video" && this.site === "x") {
+          const fit = () => this.fitContent(root);
+          root.addEventListener("loadedmetadata", fit, true);
+          this.contentListeners.set(root, () => root.removeEventListener("loadedmetadata", fit, true));
           this.fitContent(root);
         }
       }
-      for (const [root, controls] of this.roots) if (!desired.has(root)) {
+      for (const [root, controls] of this.roots) if (!desired.has(root) && (this.site !== "x" || root.isConnected)) {
         controls.remove();
         root.removeAttribute(this.attribute);
         this.unwatch(root);
         this.roots.delete(root);
       }
+      const detached = [...this.roots.keys()].filter((root) => !root.isConnected);
+      for (const root of detached.slice(0, Math.max(0, detached.length - 50))) {
+        this.roots.get(root)?.remove();
+        root.removeAttribute(this.attribute);
+        this.unwatch(root);
+        this.roots.delete(root);
+      }
     }
+    refit = () => {
+      for (const root of this.roots.keys()) if (root.isConnected) this.fitContent(root);
+    };
     clamp(root, width) {
       const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
       return Math.max(Math.min(180, available), Math.min(2400, available, width));
     }
     applyWidth(width) {
-      document.documentElement.style.setProperty(this.widthProperty, `${width}px`);
-      for (const root of this.roots.keys()) this.fitContent(root);
+      const next = `${width}px`;
+      if (document.documentElement.style.getPropertyValue(this.widthProperty) === next) return;
+      document.documentElement.style.setProperty(this.widthProperty, next);
+      this.refit();
     }
     destroy() {
+      window.removeEventListener("resize", this.refit);
       this.cancelDrag?.();
       for (const [root, controls] of this.roots) {
         controls.remove();
@@ -4592,6 +4945,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
       this.settings = settings;
       this.save = save;
       if (!isXSite()) return;
+      this.viewport = new XPostViewport();
       this.videos = new XVideoResize();
       this.images = new XVideoResize("image");
       const toggle = document.createElement("button");
@@ -4634,6 +4988,7 @@ ${word.memoryMeaning ?? ""}` : word.example;
       document.addEventListener("keydown", this.exitPost, true);
       this.update(settings);
     }
+    viewport;
     observer;
     timer;
     hidden = /* @__PURE__ */ new Set();
@@ -4720,9 +5075,11 @@ ${word.memoryMeaning ?? ""}` : word.example;
       if (!back) return;
       event.preventDefault();
       event.stopImmediatePropagation();
+      this.viewport?.restore();
       back.click();
     };
     destroy() {
+      this.viewport?.destroy();
       this.videos?.destroy();
       this.images?.destroy();
       this.ads.destroy();
@@ -5086,6 +5443,13 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div{flex:0 0 calc((100% - 6px)/2)!important;width:calc((100% - 6px)/2)!important;min-width:0!important;height:auto!important;margin-inline:0!important}
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div:only-child{flex-basis:100%!important;width:100%!important}
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div > div{width:100%!important;height:auto!important;min-width:0!important}
+/* Let the intrinsic image ratio size each carousel tile instead of X's fixed frame. */
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] :is(div,a):has([data-testid="tweetPhoto"]),[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"],[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"] div:has(img){position:relative!important;inset:auto!important;height:auto!important;min-height:0!important;max-height:none!important;aspect-ratio:auto!important;padding-block:0!important}
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] div[style*="padding-bottom"]:empty{height:0!important;min-height:0!important;padding-bottom:0!important}
+/* X renders photos as background layers with an img fallback; fit both without cropping. */
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"]{width:100%!important;max-width:100%!important;min-width:0!important;background-size:contain!important;background-position:center!important;background-repeat:no-repeat!important}
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"] [style*="background-image"]{background-size:contain!important;background-position:center!important;background-repeat:no-repeat!important}
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"] img{display:block!important;position:relative!important;inset:auto!important;opacity:1!important;width:100%!important;height:auto!important;max-width:100%!important;max-height:none!important;object-fit:contain!important;object-position:center!important}
 /* Remove the host's old ratio spacer while keeping the carousel in normal flow. */
 [data-ft-image-resizable] div:has([data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"]){height:auto!important;min-height:0!important}
 [data-ft-image-resizable] div[style*="padding-bottom"]:has([data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"]){padding-bottom:0!important}
@@ -5141,6 +5505,17 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
 [data-ft-owned="x-search-header"] button:focus-visible{outline:2px solid #1d9bf0;outline-offset:2px}
 [data-ft-x-search-surface] form{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important}
 [data-ft-x-search-surface] [role="listbox"]{max-height:60dvh!important;overflow-y:auto!important;overscroll-behavior:contain}
+
+/* Full X post text is translated even while its bilingual view is clipped. */
+[data-ft-long-source],[data-ft-long-more]{display:none!important}
+[data-ft-long-post] .ft-long-post-viewport{max-height:var(--ft-long-post-height,320px);overflow:hidden;overflow-anchor:none}
+[data-ft-long-post][data-expanded] .ft-long-post-viewport{max-height:none}
+[data-ft-owned="long-post-toggle"]{display:block;border:0;background:none;color:#1d9bf0;padding:6px 0;cursor:pointer;font:inherit;text-align:start}
+
+[data-ft-owned="long-post-ellipsis"]{color:#536471;line-height:20px}
+[data-ft-long-post][data-expanded] > [data-ft-owned="long-post-ellipsis"]{display:none}
+
+[data-ft-owned="long-post-toggle"][hidden]{display:none}
 `;
     document.head.append(style);
     let settings = loadSettings();

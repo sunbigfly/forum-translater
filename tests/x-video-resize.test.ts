@@ -111,3 +111,29 @@ it('keeps video controls and absolute placement layers inside the aspect-ratio f
   expect(document.querySelectorAll('[data-ft-owned="video-resize"]')).toHaveLength(1);
   resize.destroy();
 });
+
+it('does not observe its own size and preserves media controls and widths across feed detachment', () => {
+  vi.stubGlobal('GM_getValue', (_key: string, fallback: unknown) => fallback);
+  vi.stubGlobal('GM_setValue', vi.fn());
+  const observe = vi.fn(); vi.stubGlobal('ResizeObserver', observe);
+  document.body.innerHTML = '<main data-testid="primaryColumn"><article data-testid="tweet"><div data-testid="tweetText">Post</div><div class="frame"><div data-testid="videoPlayer"><video></video></div></div><div class="photo"><img src="https://pbs.twimg.com/media/test.jpg"></div></article></main>';
+  const feed = document.querySelector('main'); const frame = document.querySelector<HTMLElement>('.frame');
+  const player = frame?.querySelector<HTMLElement>('[data-testid="videoPlayer"]');
+  if (!feed || !frame || !player) throw new Error('Missing fixture');
+  frame.getBoundingClientRect = vi.fn(() => ({ width: 555, height: 509 } as DOMRect));
+  const measure = vi.fn(() => ({ width: 229, height: 507 } as DOMRect)); player.getBoundingClientRect = measure;
+  const videos = new XVideoResize(); const images = new XVideoResize('image');
+  videos.reconcile(); images.reconcile();
+  const controls = [...feed.querySelectorAll('[data-ft-owned="video-resize"]')];
+  const mutations = new MutationObserver(vi.fn()); mutations.observe(feed, { attributes: true, childList: true, subtree: true });
+  feed.remove(); videos.reconcile(); images.reconcile();
+  document.body.append(feed); videos.reconcile(); images.reconcile();
+  for (let i = 0; i < 10; i++) { videos.reconcile(); images.reconcile(); }
+  expect([...feed.querySelectorAll('[data-ft-owned="video-resize"]')]).toEqual(controls);
+  expect(mutations.takeRecords()).toHaveLength(0);
+  expect(observe).not.toHaveBeenCalled(); expect(measure).toHaveBeenCalledTimes(1);
+  expect(frame.style.getPropertyValue('--ft-media-fit-width')).toBe('229px');
+  player.querySelector('video')?.dispatchEvent(new Event('loadedmetadata'));
+  expect(measure).toHaveBeenCalledTimes(2);
+  mutations.disconnect(); videos.destroy(); images.destroy();
+});

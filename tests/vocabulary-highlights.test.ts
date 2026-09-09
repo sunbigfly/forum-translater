@@ -25,3 +25,17 @@ it('marks exact source words and translated terms, preserves links and restores 
   expect(sourceSnapshot(original).innerHTML).toBe(before); expect(original.querySelector('a')).toBe(link);
   highlights.clear(); expect(original.querySelector('[data-ft-word]')).toBeNull(); expect(translated.textContent).toBe('成本决定了市场存在。');
 });
+it('rechecks the original when only Chinese initially matched and text arrives later', () => {
+  const original = document.createElement('div'); original.textContent = 'Loading';
+  const translated = document.createElement('div'); translated.textContent = '大量的';
+  document.body.append(original, translated);
+  const word = { word: 'substantial', ipa: '', meaning: '大量的', example: '', level: 'CET6' as const, translatedTerm: '大量的' };
+  const highlights = new VocabularyHighlights();
+  highlights.apply(original, [translated], [word]);
+  expect(original.querySelector('[data-ft-word]')).toBeNull();
+  expect(translated.querySelector('[data-ft-word]')).not.toBeNull();
+  original.textContent = 'SUBSTANTIAL effort';
+  highlights.apply(original, [translated], [word]);
+  expect(original.querySelector('[data-ft-word]')?.textContent).toBe('SUBSTANTIAL');
+  highlights.clear(); original.remove(); translated.remove();
+});

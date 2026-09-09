@@ -84,6 +84,13 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div{flex:0 0 calc((100% - 6px)/2)!important;width:calc((100% - 6px)/2)!important;min-width:0!important;height:auto!important;margin-inline:0!important}
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div:only-child{flex-basis:100%!important;width:100%!important}
 [data-ft-image-resizable] [data-testid="ScrollSnap-List"]:has([data-testid="tweetPhoto"]) > div > div{width:100%!important;height:auto!important;min-width:0!important}
+/* Let the intrinsic image ratio size each carousel tile instead of X's fixed frame. */
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] :is(div,a):has([data-testid="tweetPhoto"]),[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"],[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"] div:has(img){position:relative!important;inset:auto!important;height:auto!important;min-height:0!important;max-height:none!important;aspect-ratio:auto!important;padding-block:0!important}
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] div[style*="padding-bottom"]:empty{height:0!important;min-height:0!important;padding-bottom:0!important}
+/* X renders photos as background layers with an img fallback; fit both without cropping. */
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"]{width:100%!important;max-width:100%!important;min-width:0!important;background-size:contain!important;background-position:center!important;background-repeat:no-repeat!important}
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"] [style*="background-image"]{background-size:contain!important;background-position:center!important;background-repeat:no-repeat!important}
+[data-ft-image-resizable] [data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"] img{display:block!important;position:relative!important;inset:auto!important;opacity:1!important;width:100%!important;height:auto!important;max-width:100%!important;max-height:none!important;object-fit:contain!important;object-position:center!important}
 /* Remove the host's old ratio spacer while keeping the carousel in normal flow. */
 [data-ft-image-resizable] div:has([data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"]){height:auto!important;min-height:0!important}
 [data-ft-image-resizable] div[style*="padding-bottom"]:has([data-testid="ScrollSnap-List"] [data-testid="tweetPhoto"]){padding-bottom:0!important}
@@ -139,3 +146,14 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
 [data-ft-owned="x-search-header"] button:focus-visible{outline:2px solid #1d9bf0;outline-offset:2px}
 [data-ft-x-search-surface] form{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important}
 [data-ft-x-search-surface] [role="listbox"]{max-height:60dvh!important;overflow-y:auto!important;overscroll-behavior:contain}
+
+/* Full X post text is translated even while its bilingual view is clipped. */
+[data-ft-long-source],[data-ft-long-more]{display:none!important}
+[data-ft-long-post] .ft-long-post-viewport{max-height:var(--ft-long-post-height,320px);overflow:hidden;overflow-anchor:none}
+[data-ft-long-post][data-expanded] .ft-long-post-viewport{max-height:none}
+[data-ft-owned="long-post-toggle"]{display:block;border:0;background:none;color:#1d9bf0;padding:6px 0;cursor:pointer;font:inherit;text-align:start}
+
+[data-ft-owned="long-post-ellipsis"]{color:#536471;line-height:20px}
+[data-ft-long-post][data-expanded] > [data-ft-owned="long-post-ellipsis"]{display:none}
+
+[data-ft-owned="long-post-toggle"][hidden]{display:none}

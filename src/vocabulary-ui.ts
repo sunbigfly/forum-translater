@@ -18,21 +18,56 @@ function soundButton(word: VocabularyWord, status: HTMLElement): HTMLButtonEleme
   const style = document.createElementNS(svg.namespaceURI, 'style'); style.textContent = '.ft-audio .ft-stop{display:none}.ft-audio.is-speaking .ft-speaker{display:none}.ft-audio.is-speaking .ft-stop{display:block;animation:ft-audio-pulse .8s ease-in-out infinite}@keyframes ft-audio-pulse{50%{opacity:.35}}@media(prefers-reduced-motion:reduce){.ft-audio.is-speaking .ft-stop{animation:none}}';
   svg.append(style, path, stop); node.append(svg); return node;
 }
-function wordDetails(word: VocabularyWord, status: HTMLElement): HTMLElement {
+type ExampleLoader = (word: VocabularyWord, target: HTMLElement) => void;
+let exampleOwner = 0;
+function exampleText(word: VocabularyWord): string { return word.memoryExample?.trim() || word.example; }
+function exampleMeaning(word: VocabularyWord): string { return (word.memoryExample?.trim() ? word.memoryMeaning : word.exampleMeaning)?.trim() ?? ''; }
+function createExampleLoader(service: TranslationService, signal: AbortSignal): ExampleLoader {
+  const requests = new Map<string, Promise<string>>();
+  const load: ExampleLoader = (word, target) => {
+    const existing = exampleMeaning(word);
+    if (existing) { target.textContent = existing; return; }
+    target.textContent = '例句翻译中…';
+    const text = exampleText(word);
+    let request = requests.get(text);
+    if (!request) {
+      const owner = `vocabulary-example:${++exampleOwner}`;
+      request = service.section(text, owner, 'visible', signal).then(value => {
+        if (!value.trim()) throw new Error('Empty example translation');
+        return value;
+      }).finally(() => service.release(owner));
+      requests.set(text, request);
+      void request.catch(() => { requests.delete(text); });
+    }
+    void request.then(value => {
+      if (signal.aborted) return;
+      if (word.memoryExample?.trim()) word.memoryMeaning = value; else word.exampleMeaning = value;
+      if (target.isConnected) target.textContent = value;
+    }).catch(() => {
+      if (signal.aborted || !target.isConnected) return;
+      target.replaceChildren('例句翻译失败，', button('重试', () => load(word, target)));
+    });
+  };
+  return load;
+}
+
+function wordDetails(word: VocabularyWord, status: HTMLElement, loadExample?: ExampleLoader): HTMLElement {
   const card = document.createElement('div'); card.className = 'word-card';
   const heading = document.createElement('strong'); heading.textContent = word.word;
   const pronunciation = document.createElement('span'); pronunciation.textContent = ` ${word.ipa} `;
   const meaning = document.createElement('p'); meaning.textContent = word.meaning;
-  const example = document.createElement('p'); example.textContent = word.memoryExample ? `${word.memoryExample}\n${word.memoryMeaning ?? ''}` : word.example;
-  card.append(heading, soundButton(word, status), pronunciation, meaning, example); return card;
+  const example = document.createElement('p'); example.textContent = exampleText(word);
+  const translation = document.createElement('p'); translation.className = 'example-translation'; translation.textContent = exampleMeaning(word) || '暂无例句翻译';
+  if (loadExample) loadExample(word, translation);
+  card.append(heading, soundButton(word, status), pronunciation, meaning, example, translation); return card;
 }
-function showWordPopup(anchor: HTMLElement, word: VocabularyWord, sourceUrl: string): () => void {
+function showWordPopup(anchor: HTMLElement, word: VocabularyWord, sourceUrl: string, loadExample: ExampleLoader): () => void {
   const host = document.createElement('div'); host.dataset.ftOwned = 'word-popup';
   host.style.cssText = 'position:fixed;z-index:2147483647;width:min(300px,calc(100vw - 16px));';
   const shadow = host.attachShadow({ mode: 'open' });
   const style = document.createElement('style'); style.textContent = `
     :host{color-scheme:light dark;font:13px/1.5 system-ui,sans-serif;color:CanvasText}
-    section{background:Canvas;border:1px solid #8884;border-radius:10px;padding:12px;box-shadow:0 6px 24px #0002;overflow-wrap:anywhere}
+    section{max-height:calc(100vh - 40px);overflow-y:auto;background:Canvas;border:1px solid #8884;border-radius:10px;padding:12px;box-shadow:0 6px 24px #0002;overflow-wrap:anywhere}
     strong{font-size:15px}p{margin:6px 0;white-space:pre-wrap}span{color:#888}
     button{font:inherit;color:inherit;background:none;border:0;padding:4px;cursor:pointer}button:hover{background:#8882;border-radius:4px}
     .icon{display:inline-flex;vertical-align:middle}[role=status]:empty{display:none}
@@ -43,13 +78,18 @@ function showWordPopup(anchor: HTMLElement, word: VocabularyWord, sourceUrl: str
     try { saveWord(word, sourceUrl); add.textContent = '★'; add.setAttribute('aria-label', '已收藏'); }
     catch { status.textContent = '收藏失败，请重试'; }
   }); add.setAttribute('aria-label', '收藏单词');
-  section.append(wordDetails(word, status), add, status); shadow.append(style, section); document.body.append(host);
-  const rect = anchor.getBoundingClientRect(); const height = host.getBoundingClientRect().height;
-  host.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - host.getBoundingClientRect().width - 8))}px`;
-  host.style.top = `${Math.max(8, Math.min(rect.bottom + 6, innerHeight - height - 8))}px`;
+  section.append(wordDetails(word, status, loadExample), add, status); shadow.append(style, section); document.body.append(host);
+  const position = (): void => {
+    const rect = anchor.getBoundingClientRect(); const height = host.getBoundingClientRect().height;
+    host.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - host.getBoundingClientRect().width - 8))}px`;
+    host.style.top = `${Math.max(8, Math.min(rect.bottom + 6, innerHeight - height - 8))}px`;
+  };
+  position();
+  const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(position);
+  resize?.observe(host);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const close = (): void => {
-    clearTimeout(timer); stopWordSpeech(shadow); host.remove();
+    clearTimeout(timer); resize?.disconnect(); stopWordSpeech(shadow); host.remove();
     anchor.removeEventListener('pointerleave', leave); anchor.removeEventListener('blur', leave);
     document.removeEventListener('keydown', key); window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close);
   };
@@ -98,13 +138,15 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
     }
   });
   visibility?.observe(observed);
-  const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl));
+  const loadExample = createExampleLoader(service, controller.signal);
+  const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl, loadExample));
   let currentWords: VocabularyWord[] = [];
   const observeTranslations = (): void => {
+    if (targets) translationObserver.observe(targets.original, { childList: true, characterData: true, subtree: true });
     for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true });
   };
   const refreshHighlights = (): void => {
-    if (!targets || controller.signal.aborted || !currentWords.length) return;
+    if (!targets || controller.signal.aborted) return;
     translationObserver.disconnect();
     highlights.clear();
     highlights.apply(targets.original, targets.translations, currentWords);
@@ -120,6 +162,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
     stopWordSpeech(shadow); cards.replaceChildren(); currentWords = []; highlights.clear();
     section.setAttribute('aria-busy', 'true');
     let displayed = cards.children.length;
+    let displayedWords: string[] = [];
     let expanded = false;
     const more = button('', () => {
       expanded = !expanded;
@@ -127,14 +170,20 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       more.textContent = expanded ? '收起' : `展开其余 ${displayed - 3} 词`; more.setAttribute('aria-expanded', String(expanded));
     }); more.className = 'more'; more.setAttribute('aria-expanded', 'false');
     const fill = (result: VocabularyWord[]): void => {
-      if (controller.signal.aborted || result.length <= displayed) return;
+      if (controller.signal.aborted) return;
+      const identities = result.map(word => JSON.stringify(word));
+      if (identities.length === displayedWords.length && identities.every((value, index) => value === displayedWords[index])) return;
+      const openWords = new Set([...cards.querySelectorAll<HTMLButtonElement>('.word[aria-expanded="true"]')].map(node => node.textContent));
+      const append = displayedWords.length <= identities.length && displayedWords.every((value, index) => value === identities[index]);
+      if (!append) { stopWordSpeech(shadow); cards.replaceChildren(); displayed = 0; }
+      displayedWords = identities;
       for (const [index, word] of result.entries()) {
         if (index < displayed) continue;
         const card = document.createElement('div'); card.hidden = !expanded && index >= 3;
         const row = document.createElement('div'); row.className = 'word-row';
         const example = document.createElement('div'); example.className = 'example'; example.hidden = true;
         const sentence = document.createElement('p');
-        const text = word.memoryExample ?? word.example;
+        const text = exampleText(word);
         const escapedWord = word.word.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         let offset = 0;
         if (escapedWord) for (const match of text.matchAll(new RegExp(`(?<![\\p{L}\\p{N}_])${escapedWord}(?![\\p{L}\\p{N}_])`, 'giu'))) {
@@ -144,15 +193,15 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
         }
         sentence.append(text.slice(offset));
         const explanation = document.createElement('p');
-        const translatedExample = word.memoryMeaning ?? '';
-        const translatedTerm = word.memoryTerm?.trim() ?? '';
+        const translatedExample = exampleMeaning(word);
+        const translatedTerm = word.memoryExample?.trim() ? word.memoryTerm?.trim() ?? '' : '';
         const termIndex = translatedTerm ? translatedExample.indexOf(translatedTerm) : -1;
         if (termIndex >= 0) {
           const marked = document.createElement('u'); marked.textContent = translatedTerm; applyVocabularyInk(marked, index);
           explanation.append(translatedExample.slice(0, termIndex), marked, translatedExample.slice(termIndex + translatedTerm.length));
         } else explanation.textContent = translatedExample;
         example.append(sentence, explanation);
-        const toggleDetails = (): void => { example.hidden = !example.hidden; label.setAttribute('aria-expanded', String(!example.hidden)); };
+        const toggleDetails = (): void => { example.hidden = !example.hidden; if (!example.hidden && !translatedExample) loadExample(word, explanation); label.setAttribute('aria-expanded', String(!example.hidden)); };
         const label = button(word.word, toggleDetails); label.className = 'word'; label.title = `${word.ipa} · 点击展开例句`; label.setAttribute('aria-expanded', 'false');
         row.onclick = event => { event.preventDefault(); event.stopPropagation(); toggleDetails(); };
         const meaning = document.createElement('span'); meaning.className = 'meaning'; meaning.textContent = word.meaning; meaning.title = word.meaning;
@@ -165,10 +214,12 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
         const bookmark = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); bookmark.setAttribute('viewBox', '0 0 24 24'); bookmark.setAttribute('aria-hidden', 'true');
         const outline = document.createElementNS(bookmark.namespaceURI, 'path'); outline.setAttribute('d', 'M7 3.5h10a1 1 0 0 1 1 1v16l-6-4-6 4v-16a1 1 0 0 1 1-1Z'); bookmark.append(outline); add.append(bookmark);
         row.append(label, add, pronunciation, soundButton(word, status), meaning); cards.append(card);
+        if (openWords.has(word.word)) toggleDetails();
       }
       displayed = result.length;
       if (displayed > 3) { more.textContent = expanded ? '收起' : `展开其余 ${displayed - 3} 词`; if (!more.isConnected) actions.append(more); }
-      host.hidden = false;
+      else more.remove();
+      host.hidden = result.length === 0;
       currentWords = result; refreshHighlights();
     };
     try {
