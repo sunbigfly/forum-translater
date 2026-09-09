@@ -3,7 +3,7 @@
   <strong>读懂 Reddit 与 X，顺手积累进阶词汇</strong>
   <br><br>
   <a href="https://greasyfork.org/zh-CN/scripts/594954"><img alt="安装脚本" src="https://img.shields.io/badge/Userscript-安装脚本-536af5"></a>
-  <img alt="版本" src="https://img.shields.io/badge/version-0.2.0-536af5">
+  <img alt="版本" src="https://img.shields.io/badge/version-0.2.2-536af5">
   <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/badge/license-MIT-f5de53"></a>
 </div>
 
