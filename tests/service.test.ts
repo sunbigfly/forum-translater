@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULTS } from '../src/settings';
 import { TranslationCache, TranslationService, splitText } from '../src/translation/service';
 import { requestJson, validateTranslation } from '../src/translation/provider';
+import { readTranslationMetrics } from '../src/translation/metrics';
 let service: TranslationService;
 let store: Map<string, unknown>;
 beforeEach(() => {
@@ -13,7 +14,7 @@ beforeEach(() => {
   vi.stubGlobal('GM_setValue', (key: string, value: unknown) => { store.set(key, value); });
   service = new TranslationService(DEFAULTS, new TranslationCache());
 });
-afterEach(() => { service.destroy(); vi.unstubAllGlobals(); });
+afterEach(() => { service.destroy(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('translation gateway and cache', () => {
   it('cancels old route work and accepts new work after reset', async () => {
     const oldTasks = service.tasks;
@@ -56,6 +57,85 @@ describe('translation gateway and cache', () => {
     service.destroy(); service = new TranslationService(DEFAULTS, new TranslationCache());
     expect(await service.section('Hello world', 'c', 'visible', signal)).toBe('你好世界'); expect(request).toHaveBeenCalledTimes(1);
     expect(request.mock.calls[0]?.[0].anonymous).toBe(true);
+  });
+  it('replays received AI text to a returning view without waiting for the vocabulary tail', async () => {
+    service.destroy();
+    service = new TranslationService({ ...DEFAULTS, provider: 'ai', ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com/v1', apiKey: 'test-only', model: 'test' } }, new TranslationCache());
+    let now = 0; vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let options: GmRequestOptions | undefined;
+    const request = vi.fn((value: GmRequestOptions) => { options = value; return { abort: vi.fn() }; }); vi.stubGlobal('GM_xmlhttpRequest', request);
+    const event = (delta: string): string => `data: ${JSON.stringify({ type: 'response.output_text.delta', delta })}\n\n`;
+    const controller = new AbortController(); const firstPartial = vi.fn();
+    const first = service.section('Hello world', 'old-view', 'visible', controller.signal, firstPartial);
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+    now = 100; let body = event('{"section_0":"'); options?.onprogress?.({ status: 200, responseText: body });
+    expect(firstPartial).not.toHaveBeenCalled();
+    now = 600; body += event('你好世界'); options?.onprogress?.({ status: 200, responseText: body });
+    expect(firstPartial).toHaveBeenCalledWith('你好世界');
+    controller.abort(); service.release('old-view'); await rejected;
+    const replay = vi.fn(); const returned = service.section('Hello world', 'new-view', 'visible', new AbortController().signal, replay);
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledWith('你好世界'));
+    expect(request).toHaveBeenCalledOnce();
+    now = 10000; body += event('","vocabulary":[]}'); options?.onprogress?.({ status: 200, responseText: body });
+    await expect(returned).resolves.toBe('你好世界');
+    expect(readTranslationMetrics().samples.filter(sample => sample.kind === 'section').slice(-2).map(sample => sample.firstContentMs)).toEqual([600, 0]);
+  });
+  it('refills only vocabulary and shares that request when a cached translation is requested repeatedly', async () => {
+    service.destroy(); const settings = { ...DEFAULTS, provider: 'ai' as const, ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com/v1', apiKey: 'test-only', model: 'test' } };
+    service = new TranslationService(settings, new TranslationCache());
+    let options: GmRequestOptions | undefined;
+    const request = vi.fn((value: GmRequestOptions) => { options = value; return { abort: vi.fn() }; }); vi.stubGlobal('GM_xmlhttpRequest', request);
+    const complete = (): void => options?.onload?.({ status: 200, responseText: JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: '{"section_0":"缓存译文","vocabulary":[]}' }] }] }) });
+    const first = service.section('Cached sentence', 'original', 'visible', new AbortController().signal);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce()); complete(); await first;
+    service.destroy(); store.delete('ft:combined-vocabulary:v1');
+    service = new TranslationService(settings, new TranslationCache());
+    const partial = vi.fn(); const next = service.section('Cached sentence', 'returned', 'visible', new AbortController().signal, partial);
+    await vi.waitFor(() => expect(partial).toHaveBeenCalledWith('缓存译文'));
+    await expect(next).resolves.toBe('缓存译文');
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    const payload = JSON.parse(typeof options?.data === 'string' ? options.data : '{}') as { input: { content: string }[] };
+    expect(JSON.parse(payload.input[1]?.content ?? '{}')).toEqual({ original: 'Cached sentence', translation: '缓存译文' });
+    await expect(service.section('Cached sentence', 'duplicate', 'visible', new AbortController().signal)).resolves.toBe('缓存译文');
+    expect(request).toHaveBeenCalledTimes(2);
+    options?.onload?.({ status: 200, responseText: JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: '[]' }] }] }) });
+    await vi.waitFor(() => expect(service.hasVocabulary('Cached sentence')).toBe(true));
+    await service.section('Cached sentence', 'again', 'visible', new AbortController().signal);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it('keeps completed AI text cached when the vocabulary stream fails and retries only missing words', async () => {
+    service.destroy();
+    service = new TranslationService({ ...DEFAULTS, provider: 'ai', ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com/v1', apiKey: 'test-only', model: 'test' } }, new TranslationCache());
+    let options: GmRequestOptions | undefined;
+    const request = vi.fn((value: GmRequestOptions) => { options = value; return { abort: vi.fn() }; }); vi.stubGlobal('GM_xmlhttpRequest', request);
+    const first = service.section('Hello world', 'first', 'visible', new AbortController().signal);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+    options?.onprogress?.({ status: 200, responseText: `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: '{"section_0":"你好世界",' })}\n\n` });
+    await expect(first).resolves.toBe('你好世界');
+    await expect(service.section('Hello world', 'still-streaming', 'visible', new AbortController().signal)).resolves.toBe('你好世界');
+    expect(request).toHaveBeenCalledOnce();
+    options?.onerror?.({ status: 0, responseText: '' });
+    await vi.waitFor(() => expect(service.tasks.snapshot().active).toBe(0));
+    await expect(service.section('Hello world', 'retry', 'interactive', new AbortController().signal)).resolves.toBe('你好世界');
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    const payload = JSON.parse(typeof options?.data === 'string' ? options.data : '{}') as { input: { content: string }[] };
+    expect(JSON.parse(payload.input[1]?.content ?? '{}')).toEqual({ original: 'Hello world', translation: '你好世界' });
+    options?.onload?.({ status: 401, responseText: '{}' });
+    expect(await service.section('Hello world', 'another-view', 'visible', new AbortController().signal)).toBe('你好世界');
+  });
+  it('rechecks cached success after retry backoff instead of issuing another request', async () => {
+    const request = vi.fn((options: GmRequestOptions) => {
+      queueMicrotask(() => request.mock.calls.length === 1 ? options.onerror?.({ status: 0, responseText: '' }) : options.onload?.({ status: 200, responseText: '[["复用译文"]]' }));
+      return { abort: vi.fn() };
+    });
+    vi.stubGlobal('GM_xmlhttpRequest', request);
+    const signal = new AbortController().signal;
+    const first = service.section('Retry source', 'first', 'visible', signal);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+    await expect(service.section('Retry source', 'second', 'visible', signal)).resolves.toBe('复用译文');
+    await expect(first).resolves.toBe('复用译文');
+    expect(request).toHaveBeenCalledTimes(2);
   });
   it('aborts the GM handle and rejects HTTP and malformed JSON failures', async () => {
     let options: Parameters<typeof GM_xmlhttpRequest>[0] | undefined;

@@ -1,3 +1,4 @@
+import { createLocalFontQuery, mountFontSettings } from './font-settings';
 import { isXSite, TRANSLATION_THEMES, type TranslationTheme } from './settings';
 import { stopWordSpeech } from './vocabulary';
 import { renderWordbook } from './vocabulary-ui';
@@ -34,9 +35,16 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     fieldset{border:0;padding:0;margin:0;min-width:0}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}
     p{font-size:12px;color:#707788;line-height:1.8}footer{padding:14px 24px;border-top:1px solid #ddd8cf;background:#ffffffb8;display:flex;align-items:center;justify-content:flex-end;gap:16px}
     [role=status]{margin:0;margin-right:auto;color:#4758d6}.actions{display:flex;gap:10px}.primary{background:#4758d6;color:white;border-color:#4758d6}.primary:hover{background:#3948b8}
+    .font-hint{margin:0 0 10px;font-size:12px}.font-catalog{display:flex;align-items:center;gap:12px;min-height:30px;margin-bottom:20px}.font-catalog [role=status]{font-size:12px;font-weight:400;color:#707788}.font-catalog button{flex:none;font-size:12px;padding:5px 10px}
+    .font-scope-tabs{display:flex;gap:4px;padding:4px;width:fit-content;background:#eeece6;border-radius:9px;margin:0 0 16px}.font-scope-tabs button{min-width:84px;padding:7px 20px;border:0;border-radius:6px;background:transparent;font-size:13px;color:#707788}.font-scope-tabs button[aria-selected=true]{background:#fff;color:#172033;box-shadow:0 1px 4px #17203312;font-weight:600}.font-group{border:1px solid #e3dfd6;border-radius:12px;padding:18px;background:#fff}.font-group label{font-size:12px;font-weight:500;margin:0 0 14px}.font-group input{font-weight:400}.font-group input[type=search]{margin:0 0 10px;font-size:12px}
+    .font-preview{height:104px;display:flex;align-items:safe center;padding:16px;margin:4px 0 16px;background:#f7f6f2;border:1px solid #eeebe5;border-radius:8px;overflow:auto;overflow-wrap:anywhere;line-height:1.6;color:#172033;font-weight:400}
+    .font-options{height:236px;overflow:auto;scrollbar-gutter:stable;margin:0 0 14px;display:grid;grid-auto-rows:64px;align-content:start;gap:5px}.font-option{text-align:left;display:flex;flex-direction:column;justify-content:center;gap:3px;padding:8px 11px;border:1px solid transparent;border-radius:7px;background:#faf9f6;min-width:0;line-height:1.4}.font-name{font-size:12px;font-weight:500;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.font-option:hover{background:#f0eee8}.font-option[aria-pressed=true]{border-color:#c4caf2;background:#eef0ff;box-shadow:inset 3px 0 #5966c7}.font-sample{font-size:15px;font-weight:400;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;color:#424b5f}.font-reset{padding:5px 0;border:0;background:transparent;font-size:12px;color:#707788}.font-reset:hover{background:transparent;color:#4758d6}
+
     @media(max-width:680px){dialog{width:calc(100vw - 20px);height:94dvh;border-radius:16px}.layout{display:block;padding:16px}nav{position:static;display:flex;overflow:auto;border-left:0;border-bottom:1px solid #ddd8cf;margin-bottom:16px}nav button{flex:1;white-space:nowrap;min-height:44px;border-left:0;border-bottom:2px solid transparent;padding:8px}nav button[aria-selected=true]{border-bottom-color:#4758d6}nav small{display:none}.section{padding:16px}.pair{grid-template-columns:1fr;gap:0}footer{padding:12px 16px;flex-wrap:wrap}header{padding:12px 16px}}
   `;
   shadow.append(style);
+  const queryFonts = createLocalFontQuery(document);
+  let fontControls: ReturnType<typeof mountFontSettings> | undefined;
   let disposeWordbook: (() => void) | undefined;
   let modelRequest: AbortController | undefined;
   let modelTimer: ReturnType<typeof setTimeout> | undefined;
@@ -56,10 +64,11 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     const content = document.createElement('div'); content.className = 'content'; layout.append(nav, content);
     const sections = new Map<string, HTMLElement>(); const tabs = new Map<string, HTMLButtonElement>();
     const activate = (id: string): void => {
+      if (id === 'fonts') fontControls?.activate();
       for (const [key, section] of sections) section.hidden = key !== id;
       for (const [key, tab] of tabs) { tab.setAttribute('aria-selected', String(key === id)); tab.tabIndex = key === id ? 0 : -1; }
     };
-    for (const [id, name, description] of [['api', '接口', '地址、密钥与模型'], ['scope', '翻译范围', '内容与预加载'], ['words', '单词本', '列表管理与词典详情'], ['cache', '缓存与说明', '本地数据与隐私']] as const) {
+    for (const [id, name, description] of [['api', '接口', '地址、密钥与模型'], ['scope', '翻译范围', '内容与预加载'], ['fonts', '字体', '标题、正文与预览'], ['words', '单词本', '列表管理与词典详情'], ['cache', '缓存与说明', '本地数据与隐私']] as const) {
       const tab = document.createElement('button'); tab.type = 'button'; tab.id = `ft-tab-${id}`; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `ft-panel-${id}`);
       const strong = document.createElement('strong'); strong.textContent = name; const small = document.createElement('small'); small.textContent = description; tab.append(strong, small);
       tab.onclick = () => activate(id); nav.append(tab); tabs.set(id, tab);
@@ -75,6 +84,8 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     const api = sections.get('api'); const scope = sections.get('scope'); const cache = sections.get('cache');
     if (!api || !scope || !cache) throw new Error('Missing settings sections');
     activate('api');
+    const fontSection = sections.get('fonts');
+    if (fontSection) fontControls = mountFontSettings(fontSection, current.fonts, queryFonts);
     let target = scope;
     const fields = new Map<string, HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>();
     function input(name: string, text: string, type: string, value: string | boolean): HTMLInputElement {
@@ -191,6 +202,8 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     const close = document.createElement('button'); close.type = 'button'; close.textContent = '关闭'; close.onclick = () => setOpen(false); actions.append(close);
     panel.onsubmit = event => {
       event.preventDefault(); const next = { ...current };
+      if (fontControls && !fontControls.valid()) { activate('fonts'); fontSection?.querySelector<HTMLInputElement>('input:invalid')?.reportValidity(); return; }
+      next.fonts = fontControls?.read() ?? current.fonts;
       next.translationTheme = theme.value as TranslationTheme;
       for (const name of ['xCollapseSidebar', 'xHideFloatingIcons', 'xHideRightSidebar', 'xHideAds'] as const) { const field = fields.get(name); if (field instanceof HTMLInputElement) next[name] = field.checked; }
       for (const name of ['enabled', 'title', 'body', 'comment', 'translationOnly', 'vocabulary'] as const) next[name] = (fields.get(name) as HTMLInputElement).checked;
@@ -210,7 +223,7 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
     };
   }
   function setOpen(open: boolean): void {
-    disposeWordbook?.(); disposeWordbook = undefined;
+    disposeWordbook?.(); disposeWordbook = undefined; fontControls?.destroy(); fontControls = undefined;
     if (!open) stopWordSpeech(shadow);
     modelRequest?.abort(); clearTimeout(modelTimer);
     if (open) {
@@ -226,5 +239,5 @@ export function mountControls(read: () => Settings, save: (settings: Settings) =
   const metricsMenu = GM_registerMenuCommand('翻译性能统计（当前页面）', () => { alert(JSON.stringify(readTranslationMetrics(), null, 2)); });
   // Guard helps hot-reload owners distinguish this surface from host DOM.
   if (!host.matches(OWNED)) throw new Error('Missing UI ownership');
-  return () => { disposeWordbook?.(); stopWordSpeech(shadow); modelRequest?.abort(); clearTimeout(modelTimer); if (dialog.open) dialog.close(); GM_unregisterMenuCommand(menu); GM_unregisterMenuCommand(metricsMenu); host.remove(); };
+  return () => { fontControls?.destroy(); disposeWordbook?.(); stopWordSpeech(shadow); modelRequest?.abort(); clearTimeout(modelTimer); if (dialog.open) dialog.close(); GM_unregisterMenuCommand(menu); GM_unregisterMenuCommand(metricsMenu); host.remove(); };
 }

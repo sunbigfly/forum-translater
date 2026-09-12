@@ -2,7 +2,10 @@
 import { webcrypto } from 'node:crypto';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { DEFAULTS, loadSettings, normalizeAiBaseUrl, saveSettings, type Settings } from '../src/settings';
-import { aiEntries, ResponseStreamDecoder, translateAi } from '../src/translation/ai';
+import { aiEntries, ResponseStreamDecoder, translateAi, translateAiBatch } from '../src/translation/ai';
+import { AiBatcher } from '../src/translation/ai-batcher';
+import { TranslationTaskManager } from '../src/translation/translation-task-manager';
+import { readTranslationMetrics } from '../src/translation/metrics';
 import { translate } from '../src/translation/provider';
 import { retryableTranslationError } from '../src/translation/retry';
 import { TranslationCache, TranslationService } from '../src/translation/service';
@@ -44,6 +47,73 @@ it.each([200, 429])('reports exhausted model quota without retry for HTTP %s', a
   expect((error as Error).message).toContain('当前模型额度已用尽');
   expect((error as Error).message).not.toContain('private');
   expect(retryableTranslationError(error)).toBe(false);
+});
+it.each([
+  { type: 'response.failed', response: { error: { code: 'usage_limit_reached', message: 'private provider detail' } } },
+  { type: 'error', error: { type: 'usage_limit_reached', message: 'private provider detail' } },
+  { type: 'error', code: 'usage_limit_reached', message: 'private provider detail' },
+])('preserves a non-retryable quota code for streaming errors: %j', async payload => {
+  const request = vi.fn((options: GmRequestOptions) => {
+    queueMicrotask(() => options.onprogress?.({ status: 200, responseText: event(payload) }));
+    return { abort: vi.fn() };
+  });
+  vi.stubGlobal('GM_xmlhttpRequest', request);
+  const error: unknown = await translateAi('Hello', ai, new AbortController().signal).catch((value: unknown) => value);
+  expect((error as Error).message).toContain('usage_limit_reached');
+  expect((error as Error).message).not.toContain('private');
+  expect(retryableTranslationError(error)).toBe(false);
+  expect(request).toHaveBeenCalledOnce();
+});
+
+it.each([
+  { section_0: '已完成正文', section_1: '缺少保护标记', vocabulary: [] },
+  { section_0: '已完成正文' },
+  { section_0: '已完成正文', section_1: '有效 ⟦0⟧', vocabulary: 'invalid' },
+])('retains valid sections from a non-streaming response before rejecting its invalid remainder: %j', async output => {
+  vi.stubGlobal('GM_xmlhttpRequest', (options: GmRequestOptions) => {
+    queueMicrotask(() => options.onload?.({ status: 200, responseText: JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(output) }] }] }) }));
+    return { abort: vi.fn() };
+  });
+  const partial = vi.fn();
+  await expect(translateAiBatch([{ text: 'First', onVocabulary: vi.fn() }, { text: 'Second ⟦0⟧' }], ai, new AbortController().signal, partial)).rejects.toThrow('不匹配');
+  expect(partial).toHaveBeenCalledWith(0, '已完成正文', true);
+  expect(partial.mock.calls.filter(call => call[0] === 0)).toHaveLength(1);
+  if (output.section_1 !== '有效 ⟦0⟧') expect(partial.mock.calls.filter(call => call[0] === 1)).toHaveLength(0);
+});
+
+it.each([
+  ['onprogress', '"尚未完成'], ['onload', '"尚未完成'],
+  ['onprogress', '"缺少保护标记"'], ['onload', '"缺少保护标记"'],
+] as const)('preserves only valid completed text before a same-block failure through %s (%s)', async (callback, unfinished) => {
+  vi.useFakeTimers();
+  const tasks = new TranslationTaskManager({ maxConcurrent: 4 });
+  const batcher = new AiBatcher(ai, tasks);
+  const sent: string[][] = [];
+  const request = vi.fn((options: GmRequestOptions) => {
+    if (typeof options.data !== 'string') throw new Error('Missing request body');
+    const payload = JSON.parse(options.data) as { input: { content: string }[] };
+    const sections = JSON.parse(payload.input[1]?.content ?? '[]') as { text: string }[];
+    sent.push(sections.map(section => section.text));
+    const responseText = sent.length === 1
+      ? event({ type: 'response.output_text.delta', delta: `{"section_0":"第一段 ⟦0⟧","section_1":${unfinished}` }) + event({ type: 'response.failed' })
+      : event({ type: 'response.output_text.delta', delta: '{"section_0":"第二段 ⟦1⟧","vocabulary":[]}' }) + event({ type: 'response.completed' });
+    queueMicrotask(() => options[callback]?.({ status: 200, responseText }));
+    return { abort: vi.fn() };
+  });
+  vi.stubGlobal('GM_xmlhttpRequest', request);
+  const signal = new AbortController().signal;
+  const first = batcher.request('first', { text: 'First ⟦0⟧', onVocabulary: vi.fn() }, 'visible', signal, vi.fn());
+  const second = batcher.request('second', { text: 'Second ⟦1⟧', onVocabulary: vi.fn() }, 'visible', signal, vi.fn());
+  const secondResolved = vi.fn(); void second.then(secondResolved);
+  await vi.advanceTimersByTimeAsync(25);
+  expect(await first).toBe('第一段 ⟦0⟧');
+  expect(secondResolved).not.toHaveBeenCalled();
+  expect(request).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(await second).toBe('第二段 ⟦1⟧');
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(sent).toEqual([['First ⟦0⟧', 'Second ⟦1⟧'], ['Second ⟦1⟧']]);
+  batcher.destroy(); tasks.destroy();
 });
 it('passes selected effort and fast tier to the transport', async () => {
   let options: GmRequestOptions | undefined;
@@ -137,6 +207,59 @@ it('publishes partial words before complete JSON and sends bounded neighbor cont
   expect(partial).toHaveBeenCalledWith('你');
   expect(options?.data).toContain('Previous paragraph');
   const assertion = expect(promise).rejects.toMatchObject({ name: 'AbortError' }); controller.abort(); await assertion;
+});
+
+it('measures the first visible translation instead of JSON syntax or an incomplete protected token', async () => {
+  vi.useFakeTimers();
+  let options: GmRequestOptions | undefined;
+  vi.stubGlobal('GM_xmlhttpRequest', (value: GmRequestOptions) => { options = value; return { abort: vi.fn() }; });
+  const partial = vi.fn();
+  const promise = translateAi('Hello ⟦0⟧', ai, new AbortController().signal, partial);
+  let responseText = '';
+  const push = (delta: string): void => {
+    responseText += event({ type: 'response.output_text.delta', delta });
+    options?.onprogress?.({ status: 200, responseText });
+  };
+  await vi.advanceTimersByTimeAsync(100); push('{"section_0":"');
+  await vi.advanceTimersByTimeAsync(200); push('   ⟦');
+  expect(partial).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(300); push('0⟧你');
+  expect(partial).toHaveBeenCalledExactlyOnceWith('   ⟦0⟧你');
+  await vi.advanceTimersByTimeAsync(300); push('"}');
+  await expect(promise).resolves.toBe('   ⟦0⟧你');
+  expect(readTranslationMetrics().samples.at(-1)).toMatchObject({ kind: 'translation', firstContentMs: 600, durationMs: 900, success: true });
+});
+
+it('publishes each section state once while later sections and 100 vocabulary deltas arrive', async () => {
+  let options: GmRequestOptions | undefined;
+  vi.stubGlobal('GM_xmlhttpRequest', (value: GmRequestOptions) => { options = value; return { abort: vi.fn() }; });
+  const partial = vi.fn(); const vocabulary = vi.fn();
+  const promise = translateAiBatch([{ text: 'One', onVocabulary: vocabulary }, { text: 'Two' }], ai, new AbortController().signal, partial);
+  let responseText = '';
+  const push = (delta: string): void => {
+    responseText += event({ type: 'response.output_text.delta', delta });
+    options?.onprogress?.({ status: 200, responseText });
+  };
+  push('{"section_0":"一');
+  push('","section_1":"二","vocabulary":[{"section":"section_0","word":"');
+  expect(partial.mock.calls).toEqual([[0, '一', false], [0, '一', true], [1, '二', true]]);
+  for (let index = 0; index < 100; index++) push('a');
+  expect(partial).toHaveBeenCalledTimes(3);
+  push('"}]}');
+  await expect(promise).resolves.toEqual(['一', '二']);
+  expect(partial).toHaveBeenCalledTimes(3);
+  expect(vocabulary).toHaveBeenLastCalledWith([{ section: 'section_0', word: 'a'.repeat(100) }], true);
+});
+
+it('records first content for a validated non-streaming response', async () => {
+  vi.useFakeTimers();
+  let options: GmRequestOptions | undefined;
+  vi.stubGlobal('GM_xmlhttpRequest', (value: GmRequestOptions) => { options = value; return { abort: vi.fn() }; });
+  const promise = translateAi('Hello', ai, new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(400);
+  options?.onload?.({ status: 200, responseText: JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: '{"section_0":"你好"}' }] }] }) });
+  await expect(promise).resolves.toBe('你好');
+  expect(readTranslationMetrics().samples.at(-1)).toMatchObject({ kind: 'translation', firstContentMs: 400, durationMs: 400, success: true });
 });
 
 it('reads GM response streams at loadstart before the transport load event', async () => {

@@ -76,16 +76,23 @@ export async function collectVocabulary(source: string, settings: Settings, task
   const text = source.slice(0, 18000);
   const key = await translationTextFingerprint([VOCABULARY_PROMPT_VERSION, settings.ai.baseUrl, settings.ai.model, text, translation], crypto.subtle);
   signal.throwIfAborted();
-  const cached: unknown = GM_getValue(CACHE, []);
-  const cache = Array.isArray(cached) ? cached as unknown[] : [];
-  const hit = cache.find(item => Array.isArray(item) && item[0] === key);
-  if (Array.isArray(hit)) {
+  const cachedResult = (): VocabularyWord[] | undefined => {
+    const cached: unknown = GM_getValue(CACHE, []);
+    const hit = Array.isArray(cached) ? cached.find(item => Array.isArray(item) && item[0] === key) as unknown : undefined;
+    if (!Array.isArray(hit)) return;
     const result = words(hit[1]);
     // Empty model selections are transient; legacy empty entries have no expiry.
     if (result.length || typeof hit[2] === 'number' && hit[2] > Date.now()) { cacheHit('vocabulary'); return result; }
-  }
+  };
+  const cached = cachedResult();
+  if (cached !== undefined) return cached;
   scheduling?.queued(`vocabulary:${key}`);
-  const result = await withTranslationRetry(() => tasks.request({ key: `vocabulary:${key}`, serviceKey: `ai:${normalizeAiBaseUrl(settings.ai.baseUrl)}:${settings.ai.model}`, priority: scheduling?.priority() ?? 'prefetch', signal, quota: settings.ai, estimatedTokens: Math.ceil((text.length + translation.slice(0, 18000).length + VOCABULARY_PROMPT.length) * 1.5) }, async requestSignal => {
+  const result = await withTranslationRetry(async () => {
+    const reused = cachedResult();
+    if (reused !== undefined) return reused;
+    return tasks.request({ key: `vocabulary:${key}`, serviceKey: `ai:${normalizeAiBaseUrl(settings.ai.baseUrl)}:${settings.ai.model}`, priority: scheduling?.priority() ?? 'prefetch', signal, quota: settings.ai, estimatedTokens: Math.ceil((text.length + translation.slice(0, 18000).length + VOCABULARY_PROMPT.length) * 1.5) }, async requestSignal => {
+    const reused = cachedResult();
+    if (reused !== undefined) return reused;
     const response = await requestVocabularyText(`${normalizeAiBaseUrl(settings.ai.baseUrl)}/responses`, requestSignal, {
       model: settings.ai.model, store: false, stream: true, reasoning: { effort: settings.ai.reasoningEffort ?? 'low' }, ...(settings.ai.fastMode ? { service_tier: 'priority' } : {}), max_output_tokens: 2400, prompt_cache_key: `forum-translater:${VOCABULARY_PROMPT_VERSION}`,
       input: [
@@ -98,7 +105,7 @@ export async function collectVocabulary(source: string, settings: Settings, task
     const normalized = normalize(decoded);
     measureRequest('vocabulary-result', { received: decoded.length, accepted: normalized.length }).finish(true);
     return normalized;
-  }), signal);
+  }); }, signal);
   signal.throwIfAborted();
   const latest: unknown = GM_getValue(CACHE, []);
   const entries: unknown[] = Array.isArray(latest) ? latest as unknown[] : [];

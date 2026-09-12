@@ -1,7 +1,8 @@
 import { redditContext } from './reddit-context';
 import { mountVocabulary } from './vocabulary-ui';
 import { xParagraphs } from './x-paragraphs';
-import { XLongPosts, updateXLongPostFold } from './x-long-posts';
+import { XLongPosts } from './x-long-posts';
+import { isXPostBackground, isXPostBackgroundRoute } from './x-post-modal';
 import { FeedDeduplicator } from './feed-deduplicator';
 import { TabTitle } from './tab-title';
 import { contentIdentity, discover, isReadable, OWNED, sourceSnapshot } from './reddit';
@@ -82,7 +83,7 @@ export class RedditRuntime {
       if (relevant) this.schedule();
     });
     this.mutations.observe(document.body, { childList: true, subtree: true, characterData: true,
-      attributes: true, attributeFilter: ['hidden', 'collapsed', 'aria-hidden', 'aria-expanded', 'open', 'class', 'style', 'slot', 'id', 'thingid', 'post-id', 'lang'] });
+      attributes: true, attributeFilter: ['hidden', 'collapsed', 'aria-hidden', 'aria-expanded', 'open', 'class', 'style', 'slot', 'id', 'thingid', 'post-id', 'lang', 'data-testid'] });
     document.addEventListener('visibilitychange', this.onVisibility);
     document.addEventListener('click', this.onCommentExpansion, true);
     document.addEventListener('toggle', this.onCommentExpansion, true);
@@ -107,7 +108,8 @@ export class RedditRuntime {
   };
   private schedule(): void { this.timer ??= setTimeout(() => { this.timer = undefined; this.reconcile(); }, 16); }
   private updateForeground(): void {
-    const first = [...this.entries.values()].filter(entry => entry.visible && entry.element.isConnected)
+    const first = [...this.entries.values()].filter(entry => entry.visible && (entry.state === 'idle' || entry.state === 'loading')
+      && !isXPostBackground(entry.element) && isReadable(entry.element))
       .sort((a, b) => a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top)[0];
     this.service.setForeground(first?.owner);
   }
@@ -146,6 +148,9 @@ export class RedditRuntime {
     for (const root of this.roots) {
       if (root instanceof Element && !root.isConnected) continue;
       for (const candidate of discover(root)) {
+        // Native Post modals aria-hide the live feed. Keep its translation DOM
+        // and in-flight work instead of treating the background as collapsed content.
+        if (isXPostBackground(candidate.element)) continue;
         const { kind } = candidate;
         if (!this.settings[kind]) continue;
         const element = this.longPosts.prepare(candidate.element);
@@ -245,13 +250,16 @@ export class RedditRuntime {
     }
     if (entry.kind !== 'title') matchTextStyle(box, entry.element);
     box.dataset.translationTheme = this.settings.translationTheme;
+    box.dataset.ftFont = entry.kind === 'title' || entry.element.matches('h1,h2,h3,h4,h5,h6') ? 'title' : 'body';
     box.lang = 'zh-CN'; box.setAttribute('aria-label', '中文翻译');
     // Keep translations outside clickable title links without replacing host content.
     const anchor = entry.element.closest('a');
     const insertionAnchor = anchor ?? entry.element;
     const slot = insertionAnchor.getAttribute('slot');
     if (slot !== null) box.setAttribute('slot', slot);
-    insertionAnchor.after(box); entry.box?.remove(); entry.box = box;
+    if (!anchor && entry.element.matches('li,td,th')) entry.element.append(box);
+    else insertionAnchor.after(box);
+    entry.box?.remove(); entry.box = box;
     for (const item of entry.inlineBoxes) item.remove(); entry.inlineBoxes = [];
     const placements = plans.map(plan => {
       let node: Node | undefined = snapshot;
@@ -265,6 +273,7 @@ export class RedditRuntime {
         const part = document.createElement('div'); part.dataset.ftOwned = 'translation'; part.className = `ft-translation${this.translationOnly ? ' ft-translation-only' : ''}`; part.lang = 'zh-CN'; part.setAttribute('aria-label', '本段中文翻译');
         matchTextStyle(part, placement.anchor ?? entry.element);
         part.dataset.translationTheme = this.settings.translationTheme;
+        part.dataset.ftFont = placement.anchor?.matches('h1,h2,h3,h4,h5,h6') || box.dataset.ftFont === 'title' ? 'title' : 'body';
         if (placement.range) {
           const insertion = placement.range.cloneRange(); insertion.collapse(false);
           // Exit terminal inline ancestors so translations never become link labels.
@@ -281,7 +290,8 @@ export class RedditRuntime {
       }
       for (const separator of x?.separators ?? []) entry.originals.hideRange(separator);
     }
-    const current = (): boolean => !controller.signal.aborted && !this.destroyed && this.route === location.href
+    const current = (): boolean => !controller.signal.aborted && !this.destroyed
+      && (this.route === location.href || isXPostBackground(entry.element) || isXPostBackgroundRoute(entry.element))
       && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity
       && sourceSnapshot(entry.element).innerHTML === entry.signature;
     const running = new Set<number>();
@@ -321,13 +331,11 @@ export class RedditRuntime {
           if (failed.has(plan.index)) { const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试本段'; retry.onclick = event => { event.preventDefault(); event.stopPropagation(); void run(plan.index, true); }; target.append(retry); }
           else if (value === undefined && !pending.has(plan.index)) target.replaceChildren();
         }
-        updateXLongPostFold(entry.element);
         return;
       }
       if (this.translationOnly && pending.size === 0 && failed.size === 0) entry.originals.hide(entry.element);
       const fragment = renderTranslationSections(snapshot, translations, { pending, failed, streaming });
       if (fragment) box.replaceChildren(fragment);
-      updateXLongPostFold(entry.element);
       if (failed.size) {
         const reason = document.createElement('span'); reason.className = 'hnr-translation-failure'; reason.setAttribute('role', 'status');
         reason.textContent = [...new Set(failureReasons.values())].join('；'); box.append(reason);
@@ -373,7 +381,14 @@ export class RedditRuntime {
       } finally {
         running.delete(index);
         if (!running.size) stopStatus();
-        if (current() && !running.size) { entry.controller = null; entry.state = failed.size ? 'error' : 'done'; this.service.release(entry.owner); }
+        if (current() && !running.size) {
+          entry.controller = null; entry.state = failed.size ? 'error' : 'done'; this.service.release(entry.owner); this.updateForeground();
+        }
+        else if (!running.size && !controller.signal.aborted && entry.controller === controller) {
+          // A route/DOM transition can invalidate the result before reconciliation.
+          // Do not leave an entry permanently loading after its last request ends.
+          this.cancel(entry); this.roots.add(entry.element); this.schedule();
+        }
       }
     };
     render();

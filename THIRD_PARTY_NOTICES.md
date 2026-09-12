@@ -7,6 +7,7 @@
 | `lite/src/translation/translation-task-manager.ts` | `src/translation/translation-task-manager.ts` | 三级优先级、订阅去重、并发、额度、取消；补充额度等待监听清理；迁入原测试 |
 | `lite/src/translation/translation-text.ts` | `src/translation/translation-text.ts` | 分段、保护占位符、指纹、结构化回填；调整失败提示；迁入原测试 |
 | `lite/src/translation/translation-service.ts` | `src/translation/provider.ts` | 改编 Google 请求参数、Microsoft token/翻译流程、结果校验；新 GM 请求与取消测试 |
+| `lite/src/settings/local-font-picker.ts` | `src/font-settings.ts`、`src/fonts.ts` | 改编本机字体读取与共享缓存、中文名称、去重搜索和实际字体预览；独立标题/正文字体与字号，使用独立设置模型与生命周期 |
 | `scripts/build-userscript.mjs` | `scripts/build-userscript.mjs` | 借用 TS → esbuild → IIFE、CSS 编译注入思路；独立 TS 构建为 main.js 和 dist 脚本，固定文件 Loader 单独生成 |
 
 新实现：Reddit DOM 规则、允许列表快照、视口调度与生命周期、缓存及独立设置面板。未搬入 HN 阅读器、论坛 API、原视图设置模型。

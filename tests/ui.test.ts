@@ -104,3 +104,24 @@ describe('standalone translation controls', () => {
     expect(document.querySelector('[data-ft-owned="controls"]')).toBeNull();
   });
 });
+
+it('automatically loads local fonts only when entering the font tab and saves font settings', () => {
+  const query = vi.fn().mockResolvedValue([]); vi.stubGlobal('queryLocalFonts', query);
+  const save = vi.fn(); destroy = mountControls(() => ({ ...DEFAULTS }), save, vi.fn());
+  vi.mocked(GM_registerMenuCommand).mock.calls[0]?.[1]();
+  const shadow = document.querySelector('[data-ft-owned="controls"]')?.shadowRoot;
+  expect(query).not.toHaveBeenCalled();
+  shadow?.querySelector<HTMLButtonElement>('#ft-tab-fonts')?.click();
+  shadow?.querySelector<HTMLButtonElement>('#ft-tab-scope')?.click();
+  shadow?.querySelector<HTMLButtonElement>('#ft-tab-fonts')?.click();
+  const family = shadow?.querySelector<HTMLInputElement>('[name="font-title-family"]');
+  if (!family) throw new Error('Missing font controls');
+  family.value = 'Microsoft YaHei';
+  shadow?.querySelector<HTMLButtonElement>('#ft-font-scope-body')?.click();
+  const size = shadow?.querySelector<HTMLInputElement>('[name="font-body-size"]');
+  if (!size) throw new Error('Missing body size');
+  size.value = '18';
+  shadow?.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }));
+  expect(save).toHaveBeenCalledWith({ ...DEFAULTS, fonts: { title: { family: 'Microsoft YaHei', size: 0 }, body: { family: '', size: 18 } } });
+  expect(query).toHaveBeenCalledTimes(1);
+});

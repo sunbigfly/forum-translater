@@ -23,55 +23,28 @@ export function fullPostText(root: HTMLElement): string | undefined {
   if (typeof text !== 'string' || !text.trim()) return;
   return text;
 }
-const pendingFolds = new WeakSet<HTMLElement>();
-export function updateXLongPostFold(element: HTMLElement): void {
-  const viewport = element.closest<HTMLElement>('.ft-long-post-viewport');
-  if (!viewport || pendingFolds.has(viewport)) return;
-  pendingFolds.add(viewport);
-  requestAnimationFrame(() => {
-    pendingFolds.delete(viewport);
-    if (!viewport.isConnected) return;
-    const frame = viewport.getBoundingClientRect();
-    if (frame.width <= 0) return;
-    const top = frame.top; const limit = top + 320;
-    let bottom = top; let contentBottom = top;
-    // Translation cards are indivisible; original text may end at a complete line.
-    for (const box of viewport.querySelectorAll<HTMLElement>('[data-ft-owned="translation"]')) {
-      if (box.hidden) continue;
-      const rect = box.getBoundingClientRect();
-      if (rect.height > 0) contentBottom = Math.max(contentBottom, rect.bottom);
-      if (rect.height > 0 && rect.bottom <= limit) bottom = Math.max(bottom, rect.bottom);
-    }
-    const walker = document.createTreeWalker(viewport, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (!node.textContent?.trim() || node.parentElement?.closest('[data-ft-owned="translation"],[data-ft-original-hidden]')) continue;
-      const range = document.createRange(); range.selectNodeContents(node);
-      for (const rect of range.getClientRects()) {
-        if (rect.height > 0) contentBottom = Math.max(contentBottom, rect.bottom);
-        if (rect.height > 0 && rect.bottom <= limit) bottom = Math.max(bottom, rect.bottom);
-      }
-    }
-    const height = Math.max(0, Math.ceil(bottom - top));
-    const overflowing = contentBottom - top > height + 1;
-    const value = overflowing ? `${height}px` : 'none';
-    if (viewport.style.getPropertyValue('--ft-long-post-height') !== value) viewport.style.setProperty('--ft-long-post-height', value);
-    const ellipsis = viewport.nextElementSibling;
-    if (ellipsis instanceof HTMLElement) ellipsis.hidden = !overflowing;
-    const button = viewport.parentElement?.querySelector<HTMLElement>(':scope > [data-ft-owned="long-post-toggle"]');
-    if (button) button.hidden = !overflowing;
-  });
+function previewText(source: HTMLElement, fullText: string): string | undefined {
+  const snapshot = sourceSnapshot(source);
+  for (const br of snapshot.querySelectorAll('br')) br.replaceWith('\n');
+  const prefix = (snapshot.textContent ?? '').replace(/\r\n?/g, '\n').trim().replace(/(?:…|\.{3})$/, '').trimEnd();
+  // Only extend a verified prefix; links and quoted text can differ from note data.
+  if (!prefix || !fullText.startsWith(prefix)) return;
+  for (const segment of new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(fullText)) {
+    const end = segment.index + segment.segment.trimEnd().length;
+    if (end < prefix.length) continue;
+    const lineEnd = fullText.indexOf('\n', prefix.length);
+    return fullText.slice(0, lineEnd < 0 ? end : Math.min(end, lineEnd)).trimEnd();
+  }
 }
 interface ExpandedPost {
   source: HTMLElement; body: HTMLElement; wrapper: HTMLElement; more: HTMLElement;
   signature: string; identity: string;
 }
 
-// Keep the native React text untouched. Our complete copy shares the normal
-// paragraph translator; clipping is purely visual and never limits its input.
+// Preserve the native text. Translate the preview through its last sentence;
+// expose the remaining source to the translator only after explicit expansion.
 export class XLongPosts {
   private posts = new Map<HTMLElement, ExpandedPost>();
-  constructor() { window.addEventListener('resize', this.resize); }
-  private resize = (): void => { for (const post of this.posts.values()) updateXLongPostFold(post.body); };
   prepare(source: HTMLElement): HTMLElement {
     if (!source.matches('[data-testid="tweetText"]') || source.closest('[data-ft-long-post]')) return source;
     const existing = this.posts.get(source);
@@ -85,22 +58,31 @@ export class XLongPosts {
     if (article?.querySelector('[data-testid="tweetText"]') !== source) return source;
     const more = source.parentElement?.querySelector<HTMLElement>(':scope > [data-testid="tweet-text-show-more-link"]');
     if (!more) return source;
-    const text = fullPostText(source);
+    const text = fullPostText(source)?.replace(/\r\n?/g, '\n').trim();
     if (!text) return source;
+    const preview = previewText(source, text);
+    if (!preview) return source;
+    const remaining = text.slice(preview.length).trimStart();
     const wrapper = document.createElement('div'); wrapper.dataset.ftLongPost = '';
     const viewport = document.createElement('div'); viewport.className = 'ft-long-post-viewport';
     const body = document.createElement('div'); body.dataset.testid = 'tweetText'; body.lang = source.lang;
-    body.textContent = text;
+    body.textContent = preview;
+    const remainder = document.createElement('div'); remainder.dataset.ftLongRemainder = ''; remainder.hidden = true;
     const button = document.createElement('button'); button.type = 'button'; button.dataset.ftOwned = 'long-post-toggle';
-    button.textContent = 'Show more'; button.setAttribute('aria-expanded', 'false');
+    button.textContent = 'Show more'; button.setAttribute('aria-expanded', 'false'); button.hidden = !remaining;
     button.onclick = event => {
       event.preventDefault(); event.stopPropagation();
       const expanded = wrapper.toggleAttribute('data-expanded');
+      if (expanded && !remainder.childNodes.length) {
+        const tail = document.createElement('div'); tail.dataset.testid = 'tweetText'; tail.lang = source.lang; tail.textContent = remaining;
+        remainder.append(tail);
+      }
+      remainder.hidden = !expanded;
       button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Show less' : 'Show more';
     };
     const ellipsis = document.createElement('div'); ellipsis.dataset.ftOwned = 'long-post-ellipsis'; ellipsis.textContent = '…'; ellipsis.setAttribute('aria-hidden', 'true');
-    viewport.append(body); wrapper.append(viewport, ellipsis, button); source.after(wrapper);
-    updateXLongPostFold(body);
+    ellipsis.hidden = !remaining;
+    viewport.append(body, remainder); wrapper.append(viewport, ellipsis, button); source.after(wrapper);
     source.setAttribute('data-ft-long-source', ''); more.setAttribute('data-ft-long-more', '');
     this.posts.set(source, { source, body, wrapper, more, signature, identity });
     return body;
@@ -116,5 +98,5 @@ export class XLongPosts {
     post.source.removeAttribute('data-ft-long-source'); post.more.removeAttribute('data-ft-long-more');
     post.wrapper.remove(); this.posts.delete(post.source);
   }
-  destroy(): void { window.removeEventListener('resize', this.resize); for (const post of this.posts.values()) this.remove(post); }
+  destroy(): void { for (const post of this.posts.values()) this.remove(post); }
 }

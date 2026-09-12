@@ -6,6 +6,40 @@ import { isRedditAd, RedditAds } from '../src/reddit-ads';
 let ads: RedditAds | undefined;
 afterEach(() => { ads?.destroy(); ads = undefined; document.body.replaceChildren(); vi.useRealTimers(); });
 
+it('hides sidebar ad slots including their heading while preserving recommendations and footer', async () => {
+  vi.useFakeTimers();
+  document.body.innerHTML = '<aside id="right-sidebar"><section id="recommendations">Ad discussion</section><div id="right-rail-ad-slot"><header>AD</header><shreddit-display-ad></shreddit-display-ad></div><footer>Reddit Rules</footer></aside>';
+  ads = new RedditAds();
+  expect(document.querySelectorAll('[data-ft-reddit-ad]')).toHaveLength(1);
+  expect(document.querySelector('#right-rail-ad-slot')?.hasAttribute('data-ft-reddit-ad')).toBe(true);
+  expect(document.querySelector('#right-sidebar')?.hasAttribute('data-ft-reddit-ad')).toBe(false);
+  expect(document.querySelector('#recommendations')?.hasAttribute('data-ft-reddit-ad')).toBe(false);
+  expect(document.querySelector('footer')?.hasAttribute('data-ft-reddit-ad')).toBe(false);
+
+  const host = document.createElement('shreddit-sidebar-ad');
+  host.attachShadow({ mode: 'open' }).innerHTML = '<header>AD</header><img alt="Apple Event">';
+  document.querySelector('aside')?.append(host);
+  await vi.advanceTimersByTimeAsync(160);
+  expect(host.hasAttribute('data-ft-reddit-ad')).toBe(true);
+  ads.destroy();
+  expect(document.querySelector('[data-ft-reddit-ad]')).toBeNull();
+});
+
+it('tracks late sidebar slot identification and releases recycled containers', async () => {
+  vi.useFakeTimers();
+  document.body.innerHTML = '<aside><div id="pending"><span>AD</span><img></div></aside>';
+  const slot = document.querySelector<HTMLElement>('#pending');
+  if (!slot) throw new Error('Missing sidebar fixture');
+  ads = new RedditAds();
+  expect(slot.hasAttribute('data-ft-reddit-ad')).toBe(false);
+  slot.id = 'right-rail-ad-slot';
+  await vi.advanceTimersByTimeAsync(160);
+  expect(slot.hasAttribute('data-ft-reddit-ad')).toBe(true);
+  slot.id = 'recommendations';
+  await vi.advanceTimersByTimeAsync(160);
+  expect(slot.hasAttribute('data-ft-reddit-ad')).toBe(false);
+});
+
 it('hides detail-page ad hosts, including shadow content, without hiding the enclosing post or comments', async () => {
   vi.useFakeTimers();
   document.body.innerHTML = '<shreddit-post id="detail"><h1>Normal post</h1><video></video><div id="actions">Vote</div><div id="ad-slot"></div><textarea></textarea><shreddit-comment>Ad discussion</shreddit-comment></shreddit-post>';

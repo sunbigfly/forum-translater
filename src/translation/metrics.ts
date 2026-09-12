@@ -1,15 +1,19 @@
 type Metric = { kind: string; durationMs: number; firstContentMs?: number; success: boolean; inputTokens?: number; outputTokens?: number; cachedTokens?: number; cacheWriteTokens?: number };
+type Summary = { count: number; failures: number; p50Ms: number; p95Ms: number; reportedUsage: number;
+  firstContentCount: number; firstContentP50Ms?: number; firstContentP95Ms?: number };
 const samples: Metric[] = [];
 const hits: Record<string, number> = {};
 let sequence = 0;
 const traceNames: string[] = [];
 export function cacheHit(kind: string): void { hits[kind] = (hits[kind] ?? 0) + 1; }
-export function readTranslationMetrics(): { samples: Metric[]; cacheHits: Record<string, number>; summary: Record<string, { count: number; failures: number; p50Ms: number; p95Ms: number; reportedUsage: number }> } {
-  const summary: Record<string, { count: number; failures: number; p50Ms: number; p95Ms: number; reportedUsage: number }> = {};
+export function readTranslationMetrics(): { samples: Metric[]; cacheHits: Record<string, number>; summary: Record<string, Summary> } {
+  const summary: Record<string, Summary> = {};
   for (const kind of new Set(samples.map(sample => sample.kind))) {
     const group = samples.filter(sample => sample.kind === kind);
     const times = group.map(sample => sample.durationMs).sort((a, b) => a - b);
-    summary[kind] = { count: group.length, failures: group.filter(sample => !sample.success).length, p50Ms: times[Math.max(0, Math.ceil(times.length * .5) - 1)] ?? 0, p95Ms: times[Math.max(0, Math.ceil(times.length * .95) - 1)] ?? 0, reportedUsage: group.filter(sample => sample.inputTokens !== undefined).length };
+    const first = group.flatMap(sample => sample.firstContentMs === undefined ? [] : [sample.firstContentMs]).sort((a, b) => a - b);
+    summary[kind] = { count: group.length, failures: group.filter(sample => !sample.success).length, p50Ms: times[Math.max(0, Math.ceil(times.length * .5) - 1)] ?? 0, p95Ms: times[Math.max(0, Math.ceil(times.length * .95) - 1)] ?? 0, reportedUsage: group.filter(sample => sample.inputTokens !== undefined).length,
+      firstContentCount: first.length, ...(first.length ? { firstContentP50Ms: first[Math.ceil(first.length * .5) - 1] ?? 0, firstContentP95Ms: first[Math.ceil(first.length * .95) - 1] ?? 0 } : {}) };
   }
   return { samples: samples.map(value => ({ ...value })), cacheHits: { ...hits }, summary };
 }

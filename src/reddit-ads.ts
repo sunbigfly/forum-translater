@@ -1,4 +1,6 @@
-const adContainerSelector = 'shreddit-ad-post,shreddit-comments-page-ad';
+// Match dedicated ad hosts/slots, not arbitrary sidebar text containing "AD".
+// Hiding the host also covers creatives rendered inside its shadow root.
+const adContainerSelector = 'shreddit-ad-post,shreddit-comments-page-ad,shreddit-sidebar-ad,shreddit-display-ad,#right-rail-ad-slot';
 const postSelector = `${adContainerSelector},shreddit-post,[data-testid="post-container"],.thing.link`;
 const promotionAttributes = ['promoted', 'is-promoted', 'is-sponsored', 'data-promoted'];
 
@@ -24,7 +26,7 @@ export class RedditAds {
       this.timer ??= setTimeout(() => { this.timer = undefined; this.reconcile(); }, 150);
     });
     this.observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true,
-      attributeFilter: [...promotionAttributes, 'class', 'slot', 'data-testid'] });
+      attributeFilter: [...promotionAttributes, 'class', 'slot', 'data-testid', 'id'] });
     this.reconcile();
   }
 

@@ -4,7 +4,7 @@ import { normalizeAiBaseUrl, type Settings } from '../settings';
 import type { TranslationTaskPriority } from './translation-task-manager';
 import { TranslationWorkerController } from './worker-controller';
 import { CombinedVocabulary } from './combined-vocabulary';
-import type { VocabularyWord } from '../vocabulary';
+import { collectVocabulary, type VocabularyWord } from '../vocabulary';
 export { splitText } from './worker-controller';
 import { cacheHit, measureRequest } from './metrics';
 import type { TranslationContext } from './ai';
@@ -59,7 +59,8 @@ export class TranslationService {
   private vocabulary: CombinedVocabulary;
   hasVocabulary(source: string): boolean { return this.vocabulary.hasPost(source); }
   watchVocabulary(source: string, callback: (words: VocabularyWord[]) => void): () => void { return this.vocabulary.watch(source, callback); }
-  private aiInflight = new Map<string, { controller: AbortController; promise: Promise<string> }>();
+  private aiInflight = new Map<string, { controller: AbortController; promise: Promise<string>; partial?: string }>();
+  private vocabularyInflight = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private foregroundOwner: string | undefined;
   setForeground(owner?: string): void { this.foregroundOwner = owner; this.worker.batcher.setForeground(owner ? this.pendingKeys.get(owner) ?? [] : []); }
   private partialListeners = new Map<string, Set<(text: string) => void>>();
@@ -88,6 +89,18 @@ export class TranslationService {
     return [...new Set(states)].join('；') || '准备翻译';
   }
   async section(text: string, owner: string, priority: TranslationTaskPriority, signal: AbortSignal, onPartial?: (text: string) => void, context?: TranslationContext): Promise<string> {
+    const metric = measureRequest('section', { provider: this.settings.provider, priority });
+    let success = false;
+    try {
+      const value = await this.translateSection(text, owner, priority, signal, partial => {
+        if (partial.trim()) metric.content();
+        onPartial?.(partial);
+      }, context);
+      if (value.trim()) metric.content();
+      success = true; return value;
+    } finally { metric.finish(success); }
+  }
+  private async translateSection(text: string, owner: string, priority: TranslationTaskPriority, signal: AbortSignal, onPartial?: (text: string) => void, context?: TranslationContext): Promise<string> {
     const values: string[] = [];
     for (const source of this.worker.preprocess(text, this.settings.provider === 'ai')) {
       signal.throwIfAborted();
@@ -102,7 +115,15 @@ export class TranslationService {
       finally { resumePrefetch?.(); }
       signal.throwIfAborted();
       const cached = this.cache.get(key);
-      if (cached !== undefined && (!combinedSource || this.vocabulary.has(combinedSource, key))) { values.push(this.worker.format(source, cached)); continue; }
+      if (cached !== undefined) {
+        const formatted = this.worker.format(source, cached);
+        onPartial?.(values.join('') + formatted);
+        if (combinedSource && !this.vocabulary.has(combinedSource, key) && !this.worker.batcher.hasPendingVocabulary(key)) {
+          // Missing optional vocabulary must never cause a paid translation to run again.
+          this.refillVocabulary(key, source, combinedSource, formatted);
+        }
+        values.push(formatted); continue;
+      }
       let keys = this.pendingKeys.get(owner);
       if (!keys) { keys = new Set(); this.pendingKeys.set(owner, keys); }
       keys.add(key);
@@ -117,11 +138,19 @@ export class TranslationService {
           if (!inflight) {
             const controller = new AbortController();
             const promise = this.worker.batcher.request(key, { text: source, group: owner, ...(context ? { context } : {}), ...(combinedSource ? { onVocabulary: (raw: unknown[], complete: boolean) => { if (!controller.signal.aborted) this.vocabulary.publish(combinedSource, key, raw, complete); } } : {}) }, this.priorities.get(owner) ?? priority, controller.signal,
-              partial => { for (const callback of this.partialListeners.get(key) ?? []) callback(partial); })
+              partial => {
+                const active = this.aiInflight.get(key);
+                if (active?.controller === controller) active.partial = partial;
+                for (const callback of this.partialListeners.get(key) ?? []) callback(partial);
+              })
               .then(value => { controller.signal.throwIfAborted(); const translated = this.worker.format(source, value); this.cache.set(key, translated); return translated; })
               .finally(() => { if (this.aiInflight.get(key)?.controller === controller) this.aiInflight.delete(key); });
             inflight = { controller, promise }; this.aiInflight.set(key, inflight);
-          } else if (priority === 'visible' || priority === 'interactive') this.worker.batcher.promote(key, priority);
+          } else {
+            if (priority === 'visible' || priority === 'interactive') this.worker.batcher.promote(key, priority);
+            // A remounted view should not wait for the next token or vocabulary tail.
+            if (inflight.partial !== undefined) listener(inflight.partial);
+          }
           const translated = await new Promise<string>((resolve, reject) => {
             const abort = (): void => reject(new DOMException('已取消', 'AbortError'));
             signal.addEventListener('abort', abort, { once: true });
@@ -130,21 +159,39 @@ export class TranslationService {
           });
           signal.throwIfAborted(); values.push(translated); continue;
         }
-        values.push(await withTranslationRetry(() => this.tasks.request({ key, serviceKey,
+        values.push(await withTranslationRetry(async () => {
+          // Another subscriber may have completed while this retry was backing off.
+          const reused = this.cache.get(key);
+          if (reused !== undefined) return this.worker.format(source, reused);
+          return this.tasks.request({ key, serviceKey,
           priority: this.priorities.get(owner) ?? priority, signal,
           quota: { requestsPerMinute: 60, tokensPerMinute: 0 },
           estimatedTokens: Math.ceil((source.length + (context?.before.length ?? 0) + (context?.after.length ?? 0) + 400) * 1.5),
         }, async requestSignal => {
+          const reused = this.cache.get(key);
+          if (reused !== undefined) return this.worker.format(source, reused);
           const metric = measureRequest(this.settings.provider); let success = false;
           try {
             const translated = await translate(source, this.settings, requestSignal, partial => { metric.content(); for (const callback of this.partialListeners.get(key) ?? []) callback(partial); }, context);
             requestSignal.throwIfAborted(); this.cache.set(key, translated); success = true; return translated;
           } finally { metric.finish(success); }
-        }), signal));
+        }); }, signal));
       } finally { keys.delete(key); listeners.delete(listener); if (!listeners.size && this.partialListeners.get(key) === listeners) this.partialListeners.delete(key); }
     }
     return this.worker.format(text, values.join(''));
   }
-  destroy(): void { for (const entry of this.aiInflight.values()) entry.controller.abort(); this.aiInflight.clear(); this.worker.destroy(); this.partialListeners.clear(); this.vocabulary.clearListeners(); this.priorities.clear(); this.pendingKeys.clear(); this.foregroundOwner = undefined; this.cache.flush(); }
+  private refillVocabulary(key: string, source: string, post: string, translation: string): void {
+    if (this.vocabularyInflight.has(key)) return;
+    const controller = new AbortController();
+    const publish = (words: VocabularyWord[], complete: boolean): void => {
+      if (!controller.signal.aborted) this.vocabulary.publish(post, key, words, complete);
+    };
+    const promise = collectVocabulary(source, this.settings, this.tasks, controller.signal, translation, words => publish(words, false))
+      .then(words => publish(words, true))
+      .catch(() => { /* Optional vocabulary failure must preserve the cached translation. */ })
+      .finally(() => { if (this.vocabularyInflight.get(key)?.controller === controller) this.vocabularyInflight.delete(key); });
+    this.vocabularyInflight.set(key, { controller, promise });
+  }
+  destroy(): void { for (const entry of this.aiInflight.values()) entry.controller.abort(); this.aiInflight.clear(); for (const entry of this.vocabularyInflight.values()) entry.controller.abort(); this.vocabularyInflight.clear(); this.worker.destroy(); this.partialListeners.clear(); this.vocabulary.clearListeners(); this.priorities.clear(); this.pendingKeys.clear(); this.foregroundOwner = undefined; this.cache.flush(); }
   resetPending(): void { this.destroy(); this.worker = new TranslationWorkerController(this.settings.ai); }
 }

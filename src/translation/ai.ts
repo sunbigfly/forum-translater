@@ -93,11 +93,16 @@ interface ResponseOutput {
     readonly type?: unknown;
     readonly content?: readonly { readonly type?: unknown; readonly text?: unknown }[];
   }[];
-  readonly error?: { readonly message?: unknown } | null;
+  readonly error?: { readonly message?: unknown; readonly type?: unknown; readonly code?: unknown } | null;
+}
+
+function responseFailure(error: ResponseOutput['error'], fallback: string): Error {
+  return new Error(error?.type === 'usage_limit_reached' || error?.code === 'usage_limit_reached'
+    ? '当前模型额度已用尽（usage_limit_reached），请切换可用模型或等待额度恢复' : fallback);
 }
 
 function decodeResponseOutput(payload: ResponseOutput): string {
-  if (payload.status === "failed" || payload.status === "incomplete" || payload.error) throw new Error("AI 响应未完成");
+  if (payload.status === "failed" || payload.status === "incomplete" || payload.error) throw responseFailure(payload.error, "AI 响应未完成");
   const content = (payload.output ?? []).flatMap((item) => item.type === "message"
     ? (item.content ?? []).flatMap((part) => part.type === "output_text" && typeof part.text === "string" ? [part.text] : [])
     : []).join("");
@@ -121,6 +126,7 @@ export class ResponseStreamDecoder {
   constructor(readonly onContent?: (content: string) => void, readonly onUsage?: (usage: unknown) => void) {}
 
   get done(): boolean { return this.#done; }
+  get content(): string { return this.#content; }
 
   push(body: string, final = false): string {
     const chunk = body.startsWith(this.#received) ? body.slice(this.#received.length) : body;
@@ -160,6 +166,8 @@ export class ResponseStreamDecoder {
         readonly type?: unknown;
         readonly delta?: unknown;
         readonly text?: unknown;
+        readonly code?: unknown;
+        readonly error?: ResponseOutput['error'];
         readonly response?: ResponseOutput & { usage?: unknown };
       };
       if (payload.response?.usage) this.onUsage?.(payload.response.usage);
@@ -170,7 +178,7 @@ export class ResponseStreamDecoder {
       } else if (payload.type === "response.completed" && payload.response && !this.#content) {
         this.#publish(decodeResponseOutput(payload.response));
       } else if (payload.type === "response.failed" || payload.type === "response.incomplete" || payload.type === "error") {
-        this.#failure = new Error("AI 响应失败");
+        this.#failure = responseFailure(payload.response?.error ?? payload.error ?? payload, "AI 响应失败");
       }
       if (payload.type === "response.completed" || payload.type === "response.failed") this.#done = true;
     }
@@ -226,15 +234,34 @@ export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, 
     sections.forEach((section, index) => section.onVocabulary?.(words.filter(word => word && typeof word === 'object' && 'section' in word && word.section === `section_${index}`), complete));
   };
   const entries = sections.map((section, index) => ({ id: `section_${index}`, text: section.text, before: section.context?.before ?? '', after: section.context?.after ?? '' }));
+  const published = new Map<number, StreamedJsonValue>();
+  let markContent: (() => void) | undefined;
+  const publishTranslation = (index: number, value: string, complete: boolean): void => {
+    const previous = published.get(index);
+    if (previous?.value === value && previous.complete === complete) return;
+    published.set(index, { value, complete });
+    markContent?.(); onPartial?.(index, value, complete);
+  };
+  const preserveCompletedTranslations = (raw: string): void => {
+    const partials = streamedJsonRecord(raw);
+    entries.forEach((entry, index) => {
+      const partial = partials[entry.id];
+      if (partial?.complete && partial.value.trim() && translationProtectedTokensMatch(entry.text, partial.value)) publishTranslation(index, partial.value, true);
+    });
+  };
   const decodeValues = (raw: string): string[] => {
     const values: unknown = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
-    if (!values || typeof values !== 'object' || Array.isArray(values) || Object.keys(values).length !== entries.length + Number(combined)) throw new Error('AI 译文段落不匹配');
+    if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('AI 译文段落不匹配');
     const record = values as Record<string, unknown>;
-    const translations = entries.map(entry => {
+    let invalidTranslation = false;
+    const translations = entries.map((entry, index) => {
       const value = record[entry.id];
-      if (typeof value !== 'string' || !value.trim() || !translationProtectedTokensMatch(entry.text, value)) throw new Error('AI 译文占位符不匹配');
+      if (typeof value !== 'string' || !value.trim() || !translationProtectedTokensMatch(entry.text, value)) { invalidTranslation = true; return ''; }
+      publishTranslation(index, value, true);
       return value;
     });
+    if (Object.keys(values).length !== entries.length + Number(combined)) throw new Error('AI 译文段落不匹配');
+    if (invalidTranslation) throw new Error('AI 译文占位符不匹配');
     if (combined) {
       if (!Array.isArray(record.vocabulary)) throw new Error('AI 词汇格式不匹配');
       publishWords(record.vocabulary, true);
@@ -246,7 +273,8 @@ export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, 
     let settled = false;
     let handle: { abort(): void } | undefined;
     const metric = measureRequest('translation', { sections: sections.length, model: ai.model, effort: ai.reasoningEffort ?? 'low', fast: ai.fastMode === true });
-    const stream = new ResponseStreamDecoder(() => metric.content(), usage => metric.usage(usage));
+    markContent = () => metric.content();
+    const stream = new ResponseStreamDecoder(() => metric.milestone('first-output-delta'), usage => metric.usage(usage));
     const finish = (action: () => void): void => {
       if (settled) return;
       settled = true; clearTimeout(watchdog); signal.removeEventListener('abort', abort); action(); metric.finish(false);
@@ -294,13 +322,17 @@ export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, 
           entries.forEach((entry, index) => {
             const partial = partials[entry.id]?.value;
             const complete = partials[entry.id]?.complete === true;
-            if (partial && (!complete || translationProtectedTokensMatch(entry.text, partial))) onPartial?.(index, partial, complete);
+            if (!partial?.replace(/⟦[^⟧]*$/, '').trim() || complete && !translationProtectedTokensMatch(entry.text, partial)) return;
+            publishTranslation(index, partial, complete);
           });
           let values: string[];
           try { values = decodeValues(raw); } catch { return; }
           stream.push(response.responseText, true);
           metric.finish(true); finish(() => resolve(values)); handle?.abort();
-        } catch (error) { finish(() => reject(error instanceof Error && !(error instanceof SyntaxError) ? error : new Error('AI 流式 JSON 无法解析'))); handle?.abort(); }
+        } catch (error) {
+          preserveCompletedTranslations(stream.content);
+          finish(() => reject(error instanceof Error && !(error instanceof SyntaxError) ? error : new Error('AI 流式 JSON 无法解析'))); handle?.abort();
+        }
       },
       onload: response => {
         if (response.response && typeof response.response === 'object' && 'getReader' in response.response) { void consumeStream(response); return; }
@@ -318,8 +350,11 @@ export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, 
           const raw = isStream ? stream.push(response.responseText, true) : decodeResponse(response.responseText);
           if (isStream && !stream.done) throw new Error('AI 响应未完整结束');
           if (!isStream) metric.usage((JSON.parse(response.responseText) as { usage?: unknown }).usage);
-          const values = decodeValues(raw); metric.finish(true); resolve(values);
-        } catch (error) { reject(error instanceof Error && !(error instanceof SyntaxError) ? error : new Error('AI 返回的 JSON 无法解析')); }
+          const values = decodeValues(raw); metric.content(); metric.finish(true); resolve(values);
+        } catch (error) {
+          preserveCompletedTranslations(stream.content);
+          reject(error instanceof Error && !(error instanceof SyntaxError) ? error : new Error('AI 返回的 JSON 无法解析'));
+        }
       }); },
       onerror: () => finish(() => reject(new Error('AI 网络失败，请检查地址与油猴域名授权'))),
       ontimeout: () => finish(() => reject(new Error('AI 翻译超时'))),

@@ -1,4 +1,5 @@
 import { XPostViewport } from './x-post-viewport';
+import { isXPostPath, XPostModal } from './x-post-modal';
 import { isXSite, type Settings } from './settings';
 import { XAds } from './x-ads';
 import { XVideoResize } from './x-video-resize';
@@ -8,6 +9,7 @@ const launchers = '[data-testid="GrokDrawer"],[data-testid="DMDrawer"],button[ar
 
 export class XLayout {
   private viewport: XPostViewport | undefined;
+  private posts = new XPostModal();
   private observer: MutationObserver | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private hidden = new Set<HTMLElement>();
@@ -51,8 +53,10 @@ export class XLayout {
     this.scan();
   }
   private scan(): void {
+    this.posts.reconcile();
     this.videos?.reconcile();
     this.images?.reconcile();
+    this.viewport?.reconcile();
     const nav = document.querySelector<HTMLElement>('header[role="banner"] nav');
     const rail = nav?.parentElement;
     if (rail && nav && this.toggle && this.brand) {
@@ -97,16 +101,20 @@ export class XLayout {
   private restoreIcons(): void { for (const node of this.hidden) node.removeAttribute('data-ft-x-hidden-icon'); this.hidden.clear(); }
   private exitPost = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || event.repeat || event.defaultPrevented || event.isComposing
-      || !/^\/[^/]+\/status\/\d+\/?$/.test(location.pathname ?? '') || document.fullscreenElement) return;
-    if (event.composedPath().some(node => node instanceof HTMLElement && (node.isContentEditable || node.matches('input,textarea,select,[contenteditable="true"],dialog,[role="dialog"],[role="menu"]')))) return;
-    if (document.querySelector('[role="dialog"],[role="menu"],[data-ft-owned="word-popup"],:popover-open')) return;
-    const back = document.querySelector<HTMLElement>('[data-testid="primaryColumn"] [data-testid="app-bar-back"]');
+      || !isXPostPath(location.pathname ?? '') || document.fullscreenElement) return;
+    const post = document.querySelector<HTMLElement>('[data-ft-x-native-post]');
+    if (event.composedPath().some(node => node instanceof HTMLElement && (node.isContentEditable || node.matches('input,textarea,select,[contenteditable="true"],[role="menu"]')
+      || node.matches('dialog,[role="dialog"]') && node !== post && !node.contains(post)))) return;
+    if ([...document.querySelectorAll('[role="dialog"],dialog[open]')].some(node => node !== post && !node.contains(post))
+      || document.querySelector('[role="menu"],[data-ft-owned="word-popup"],:popover-open')) return;
+    const back = (post ?? document).querySelector<HTMLElement>('[data-testid="primaryColumn"] [data-testid="app-bar-back"]');
     if (!back) return;
     // Consume Escape before the host handles it too; only the native back click
     // should navigate, otherwise one keypress can trigger two route changes.
     event.preventDefault(); event.stopImmediatePropagation(); this.viewport?.restore(); back.click();
   };
   destroy(): void {
+    this.posts.destroy();
     this.viewport?.destroy();
     this.videos?.destroy();
     this.images?.destroy();

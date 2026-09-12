@@ -137,3 +137,21 @@ it('does not observe its own size and preserves media controls and widths across
   expect(measure).toHaveBeenCalledTimes(2);
   mutations.disconnect(); videos.destroy(); images.destroy();
 });
+
+it('never treats an Article body or content block as a media frame', () => {
+  vi.stubGlobal('GM_getValue', (_key: string, fallback: unknown) => fallback);
+  vi.stubGlobal('GM_setValue', vi.fn());
+  document.body.innerHTML = '<div data-testid="primaryColumn"><article data-testid="tweet"><div data-testid="twitterArticleRichTextView"><div data-testid="longformRichTextComponent"><div data-block="true">Article paragraph</div><section data-block="true"><div class="video-frame"><div data-testid="videoPlayer"><video></video></div></div></section><section data-block="true"><div class="image-frame"><img src="https://pbs.twimg.com/media/article.jpg"></div></section></div></div></article></div>';
+  const videos = new XVideoResize(); const images = new XVideoResize('image');
+  videos.reconcile(); images.reconcile();
+  expect(document.querySelector('.video-frame')?.hasAttribute('data-ft-video-resizable')).toBe(true);
+  expect(document.querySelector('.image-frame')?.hasAttribute('data-ft-image-resizable')).toBe(true);
+  for (const node of document.querySelectorAll('[data-block],[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]')) {
+    expect(node.hasAttribute('data-ft-video-resizable')).toBe(false);
+    expect(node.hasAttribute('data-ft-image-resizable')).toBe(false);
+  }
+  videos.reconcile(); images.reconcile();
+  expect(document.querySelectorAll('[data-ft-owned="video-resize"]')).toHaveLength(2);
+  videos.destroy(); images.destroy();
+  expect(document.querySelector('[data-ft-owned="video-resize"]')).toBeNull();
+});

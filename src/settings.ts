@@ -1,15 +1,17 @@
+import { DEFAULT_FONTS, normalizeFonts, type FontSettings } from './fonts';
 export type Kind = 'title' | 'body' | 'comment';
 export const TRANSLATION_THEMES = { quote: '淡灰引用', plain: '自然正文', weakening: '弱化译文', 'dividing-line': '分隔线', underline: '下划线', highlight: '柔和高亮', paper: '纸张卡片' } as const;
 export type TranslationTheme = keyof typeof TRANSLATION_THEMES;
 export interface AiProfile { baseUrl: string; apiKey: string; model: string; prompt: string; requestsPerMinute: number; tokensPerMinute: number; reasoningEffort?: 'none' | 'low'; fastMode?: boolean }
 export interface Settings {
+  fonts: FontSettings;
   xCollapseSidebar: boolean; xHideFloatingIcons: boolean; xHideRightSidebar: boolean; xHideAds: boolean;
   translationOnly: boolean; enabled: boolean; title: boolean; body: boolean; comment: boolean; vocabulary: boolean;
   before: number; after: number; provider: 'google' | 'microsoft' | 'ai'; ai: AiProfile; translationTheme: TranslationTheme;
 }
-export const DEFAULTS: Settings = { xHideAds: true, xCollapseSidebar: true, xHideFloatingIcons: true, xHideRightSidebar: true, translationTheme: 'quote', translationOnly: false, enabled: true, title: true, body: true, comment: true, vocabulary: true, before: 600, after: 1200, provider: 'google', ai: { baseUrl: '', apiKey: '', model: '', prompt: '', requestsPerMinute: 30, tokensPerMinute: 0, reasoningEffort: 'low', fastMode: false } };
+export const DEFAULTS: Settings = { fonts: DEFAULT_FONTS, xHideAds: true, xCollapseSidebar: true, xHideFloatingIcons: true, xHideRightSidebar: true, translationTheme: 'quote', translationOnly: false, enabled: true, title: true, body: true, comment: true, vocabulary: true, before: 600, after: 1200, provider: 'google', ai: { baseUrl: '', apiKey: '', model: '', prompt: '', requestsPerMinute: 30, tokensPerMinute: 0, reasoningEffort: 'low', fastMode: false } };
 export function normalizeSettings(raw: Partial<Settings>): Settings {
-  const value = { ...DEFAULTS, ai: { ...DEFAULTS.ai } };
+  const value = { ...DEFAULTS, fonts: normalizeFonts(raw.fonts), ai: { ...DEFAULTS.ai } };
   value.ai.reasoningEffort = raw.ai?.reasoningEffort === 'none' ? 'none' : 'low';
   value.ai.fastMode = raw.ai?.fastMode === true;
   for (const key of ['baseUrl', 'apiKey', 'model', 'prompt'] as const) if (typeof raw.ai?.[key] === 'string') value.ai[key] = raw.ai[key].trim();

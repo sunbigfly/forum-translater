@@ -45,6 +45,8 @@ article[data-testid="tweet"]{background-color:transparent!important}
 article[data-testid="tweet"] [data-testid="tweetText"],
 article[data-testid="tweet"] [data-testid="tweetText"] [data-ft-owned="translation"],
 article[data-testid="tweet"] [data-testid="tweetText"] + [data-ft-owned="translation"]{font-size:15px!important;line-height:20px!important}
+/* Desktop rails must not reserve space or force a hidden banner onto phones. */
+@media(min-width:701px){
 [data-ft-x-sidebar-collapsed] header[role="banner"]{display:flex!important;position:fixed!important;inset:0 auto 0 0;width:72px!important;z-index:100;align-items:center!important;background:Canvas}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden]{--ft-x-content-edge:15vw}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] header[role="banner"]{left:max(0px,calc(15vw - 120px))!important}
@@ -62,13 +64,24 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-x-sidebar-collapsed] header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:'';inset:50% auto auto 50%;width:20px;height:20px;transform:translate(-50%,-50%);background:linear-gradient(currentColor,currentColor) center/2px 18px no-repeat,linear-gradient(currentColor,currentColor) center/18px 2px no-repeat}
 [data-ft-x-sidebar-collapsed] header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"]{width:56px!important;padding:8px!important}
 [data-ft-x-sidebar-collapsed] header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] > div:not(:has(img)){display:none!important}
+}
 [data-ft-x-right-hidden] [data-testid="sidebarColumn"]{display:none!important}
+@media(min-width:701px){
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]){--ft-x-nav-width:clamp(240px,24vw,320px);--ft-x-content-edge:var(--ft-x-nav-width)}
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]) header[role="banner"]{width:var(--ft-x-nav-width)!important;flex:0 0 var(--ft-x-nav-width)!important}
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]) main[role="main"]{min-width:0!important}
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]) main[role="main"] > div{width:calc(100vw - 2 * var(--ft-x-nav-width))!important;max-width:calc(100vw - 2 * var(--ft-x-nav-width))!important;min-width:0!important}
+}
 [data-ft-x-right-hidden] main[role="main"] :is(div:has(> [data-testid="primaryColumn"]),[data-testid="primaryColumn"]){width:100%!important;max-width:none!important;min-width:0!important;flex-basis:auto!important}
 [data-ft-x-right-hidden] [data-testid="primaryColumn"] div:has(> section [data-testid="cellInnerDiv"]){width:100%!important;max-width:none!important}
+/* Article has additional narrow wrappers inside the already expanded column. */
+[data-ft-x-right-hidden] [data-testid="primaryColumn"] :is([data-testid="twitterArticleReadView"],[data-testid="twitterArticleTitle"],[data-testid="twitter-article-title"],[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"],div:has([data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"])){box-sizing:border-box;width:100%!important;max-width:none!important;min-width:0!important}
+/* The expanded Article reader sits outside primaryColumn. */
+@media(min-width:701px){
+[data-ft-x-right-hidden] div:has(> div > article[data-testid="twitterArticleReadView"]):not([data-testid="primaryColumn"] *){width:70vw!important;max-width:calc(100vw - 32px)!important;margin-inline:auto}
+}
+[data-ft-x-right-hidden] div:has(> div > article[data-testid="twitterArticleReadView"]):not([data-testid="primaryColumn"] *) > div{width:100%!important;max-width:none!important}
+:is([data-testid="twitterArticleTitle"],[data-testid="twitter-article-title"]) + [data-ft-owned="translation"]{align-self:stretch;width:100%}
 /* Keep inline videos compact when the reading column is widened. */
 [data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){position:relative!important;width:min(100%,var(--ft-media-fit-width,var(--ft-x-video-width,420px)))!important;max-width:var(--ft-x-video-width,420px)!important;min-width:0!important}
 [data-ft-image-resizable]{position:relative!important;width:100%!important;max-width:var(--ft-x-image-width,420px)!important;min-width:0!important}
@@ -110,16 +123,20 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-owned="video-resize"] button:focus-visible{outline:2px solid #1d9bf0;outline-offset:-2px}
 :fullscreen [data-ft-owned="video-resize"],[data-ft-video-resizable]:has(:fullscreen) > [data-ft-owned="video-resize"]{display:none}
 [data-ft-x-hide-icons] :is([data-testid="GrokDrawer"],[data-testid="chat-drawer-root"]){display:none!important}
+@media(min-width:701px){
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"]{align-items:center!important;width:100%;min-width:0}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"] > div{width:70vw!important;max-width:70vw!important;min-width:0!important;margin-inline:auto!important}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"] :is(div:has(> [data-testid="primaryColumn"]),[data-testid="primaryColumn"]){width:100%!important;max-width:none!important;min-width:0!important;flex-basis:auto!important}
+}
 [data-ft-x-hidden-icon]{display:none!important}
 [data-ft-x-ad]{display:none!important}
 [data-ft-reddit-ad]{display:none!important}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] [data-testid="primaryColumn"] div:has(> section [data-testid="cellInnerDiv"]){width:100%!important;max-width:none!important}
 /* Never hide a shared heading or navigation container. */
+@media(min-width:701px){
 a[data-ft-x-native-logo]:not(:has(nav)):not(:has([data-ft-owned="x-sidebar-toggle"])){display:none!important}
 header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has([data-ft-owned="x-sidebar-toggle"])){display:none!important}
+}
 [data-ft-owned="x-sidebar-brand"]{display:flex!important;align-items:center;justify-content:center;flex:0 0 52px;width:52px;height:52px;box-sizing:border-box;margin:2px 0;color:inherit}
 [data-ft-x-sidebar-collapsed] [data-ft-owned="x-sidebar-brand"]{align-self:center!important;margin-inline:auto!important}
 [data-ft-owned="x-sidebar-toggle"]{display:grid!important;place-items:center;width:52px;height:52px;box-sizing:border-box;margin:0;padding:10px;border:0;border-radius:50%;background:transparent;color:inherit;cursor:pointer}
@@ -147,13 +164,40 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
 [data-ft-x-search-surface] form{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important}
 [data-ft-x-search-surface] [role="listbox"]{max-height:60dvh!important;overflow-y:auto!important;overscroll-behavior:contain}
 
-/* Full X post text is translated even while its bilingual view is clipped. */
+/* Keep the preview's final sentence and translation whole; defer the remainder. */
 [data-ft-long-source],[data-ft-long-more]{display:none!important}
-[data-ft-long-post] .ft-long-post-viewport{max-height:var(--ft-long-post-height,320px);overflow:hidden;overflow-anchor:none}
-[data-ft-long-post][data-expanded] .ft-long-post-viewport{max-height:none}
+[data-ft-long-post] .ft-long-post-viewport{overflow-anchor:none}
+[data-ft-long-post] [data-testid="tweetText"]{white-space:pre-wrap}
+[data-ft-long-remainder][hidden]{display:none!important}
 [data-ft-owned="long-post-toggle"]{display:block;border:0;background:none;color:#1d9bf0;padding:6px 0;cursor:pointer;font:inherit;text-align:start}
 
 [data-ft-owned="long-post-ellipsis"]{color:#536471;line-height:20px}
 [data-ft-long-post][data-expanded] > [data-ft-owned="long-post-ellipsis"]{display:none}
 
 [data-ft-owned="long-post-toggle"][hidden]{display:none}
+
+/* Prepare Post skeleton and content geometry before the first paint. The runtime
+   marker only identifies the scroll target; it must not change the layout. */
+[data-ft-x-post-layout] [role="dialog"]:has([data-testid="primaryColumn"]):not(:has([role="dialog"] [data-testid="primaryColumn"])){overflow-y:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}
+[data-ft-x-post-layout] [role="dialog"] [data-testid="primaryColumn"]{box-sizing:border-box;width:100%!important;max-width:none!important;min-width:0!important;flex:1 1 auto!important;padding-inline:var(--ft-x-content-edge,15vw)!important}
+@media(max-width:700px){
+/* Fill the available mobile column in either sidebar setting. Native tablet
+   navigation can keep its own width; no viewport-based rail margin is added. */
+[data-ft-x-right-hidden]{--ft-x-content-edge:8px}
+[data-ft-x-right-hidden] main[role="main"]{flex:1 1 0%!important;min-width:0!important;align-items:stretch!important}
+[data-ft-x-right-hidden] main[role="main"] > div{box-sizing:border-box;width:100%!important;max-width:100%!important;min-width:0!important;margin-inline:0!important}
+[data-ft-x-right-hidden] div:has(> div > article[data-testid="twitterArticleReadView"]):not([data-testid="primaryColumn"] *){box-sizing:border-box;width:100%!important;max-width:100%!important;min-width:0!important;margin-inline:0!important}
+[data-ft-owned="x-sidebar-brand"]{display:none!important}
+[data-ft-x-post-layout] [role="dialog"] [data-testid="primaryColumn"]{padding-inline:8px!important}
+/* Shrink both the avatar and its reserved column so text can move left. Keep
+   the column height untouched for native conversation connector lines. */
+article[data-testid="tweet"] div:has(> [data-testid="Tweet-User-Avatar"]){width:28px!important;min-width:28px!important;max-width:28px!important;flex:0 0 28px!important;margin-inline-end:6px!important}
+article[data-testid="tweet"] [data-testid="Tweet-User-Avatar"]{width:28px!important;height:28px!important;min-width:28px!important;max-width:28px!important;flex:0 0 auto!important}
+/* X sets 40px inline on this deeper container, below the outer avatar slot. */
+article[data-testid="tweet"] [data-testid="Tweet-User-Avatar"] [data-testid^="UserAvatar-Container-"]{width:28px!important;height:28px!important;min-width:0!important;max-width:100%!important}
+/* Keep counts and share controls together without the desktop wrapping gap. */
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])){justify-content:space-between!important;gap:0!important;flex-wrap:nowrap!important;min-width:0!important}
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])) > div{flex:0 1 auto!important;min-width:0!important}
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])) :is(button,[role="button"],a){min-width:0!important;min-height:36px}
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])) span{font-size:12px!important;white-space:nowrap}
+}

@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest';
-import { XLongPosts, fullPostText, updateXLongPostFold } from '../src/x-long-posts';
+import { XLongPosts, fullPostText } from '../src/x-long-posts';
 let posts: XLongPosts | undefined;
 afterEach(() => { posts?.destroy(); vi.restoreAllMocks(); document.body.replaceChildren(); });
-function fixture(note: unknown = { text: 'First paragraph\n\nComplete final sentence beyond the preview.' }, id = '123'): HTMLElement {
+function fixture(note: unknown = { text: 'First paragraph\n\nComplete final sentence beyond the preview. Hidden next sentence.\n\nHidden final paragraph.' }, id = '123'): HTMLElement {
   document.body.innerHTML = '<article data-testid="tweet"><a href="/user/status/123"><time>Now</time></a><div><div data-testid="tweetText" lang="en">First paragraph\n\nComplete</div><button data-testid="tweet-text-show-more-link">Show more</button></div></article>';
   const article = document.querySelector('article'); const source = document.querySelector<HTMLElement>('[data-testid="tweetText"]');
   if (!article || !source) throw new Error('Missing fixture');
@@ -15,14 +15,20 @@ it('reads normalized and GraphQL full notes only for the matching post', () => {
   expect(fullPostText(fixture({ note_tweet_results: { result: { text: 'GraphQL complete text' } } }))).toBe('GraphQL complete text');
   expect(fullPostText(fixture({ text: 'Unrelated quoted post' }, '456'))).toBeUndefined();
 });
-it('keeps the complete source available while the local button only toggles display', () => {
+it('completes only the preview sentence and mounts the remainder on the first expansion', () => {
   const source = fixture(); const nativeContent = source.innerHTML; posts = new XLongPosts();
-  const body = posts.prepare(source); expect(body.textContent).toContain('beyond the preview.');
+  const body = posts.prepare(source); expect(body.textContent).toBe('First paragraph\n\nComplete final sentence beyond the preview.');
   expect(source.innerHTML).toBe(nativeContent); expect(source.hasAttribute('data-ft-long-source')).toBe(true);
+  const remainder = document.querySelector<HTMLElement>('[data-ft-long-remainder]');
+  expect(remainder?.childNodes).toHaveLength(0); expect(remainder?.hidden).toBe(true);
   const button = document.querySelector<HTMLButtonElement>('[data-ft-owned="long-post-toggle"]');
+  expect(button?.hidden).toBe(false);
   expect(button?.getAttribute('aria-expanded')).toBe('false'); button?.click();
   expect(button?.getAttribute('aria-expanded')).toBe('true'); expect(posts.prepare(source)).toBe(body);
+  expect(remainder?.textContent).toBe('Hidden next sentence.\n\nHidden final paragraph.'); expect(remainder?.hidden).toBe(false);
+  const tail = remainder?.firstChild;
   button?.click(); expect(button?.getAttribute('aria-expanded')).toBe('false'); expect(body.textContent).toContain('beyond the preview.');
+  expect(remainder?.hidden).toBe(true); button?.click(); expect(remainder?.firstChild).toBe(tail);
   posts.destroy(); expect(source.innerHTML).toBe(nativeContent); expect(source.hasAttribute('data-ft-long-source')).toBe(false);
   expect(document.querySelector('[data-ft-long-post]')).toBeNull();
 });
@@ -38,23 +44,28 @@ it('preserves a detached feed and removes a stale copy when the host replaces it
   source.remove(); posts.reconcile(); expect(body.isConnected).toBe(false);
 });
 
-it('cuts before a partial translation card and keeps complete original lines', () => {
-  document.body.innerHTML = '<div class="ft-long-post-viewport"><div class="source">Original text</div><div data-ft-owned="translation">译文</div></div><div>…</div><button data-ft-owned="long-post-toggle">Show more</button>';
-  const viewport = document.querySelector<HTMLElement>('.ft-long-post-viewport');
-  const source = document.querySelector<HTMLElement>('.source'); const card = document.querySelector<HTMLElement>('[data-ft-owned="translation"]');
-  if (!viewport || !source || !card) throw new Error('Missing fixture');
-  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => { callback(0); return 1; });
-  vi.spyOn(viewport, 'getBoundingClientRect').mockReturnValue({ top: 100, width: 500 } as DOMRect);
-  const cardRect = vi.spyOn(card, 'getBoundingClientRect').mockReturnValue({ top: 220, bottom: 450, height: 230 } as DOMRect);
-  vi.spyOn(document, 'createRange').mockReturnValue({ selectNodeContents: vi.fn(), getClientRects: () => [{ top: 160, bottom: 180, height: 20 }, { top: 185, bottom: 205, height: 20 }] } as unknown as Range);
-  Object.defineProperty(viewport, 'scrollHeight', { value: 500 });
-  updateXLongPostFold(source);
-  expect(viewport.style.getPropertyValue('--ft-long-post-height')).toBe('105px');
-  expect((viewport.nextElementSibling as HTMLElement).hidden).toBe(false);
-  expect(document.querySelector<HTMLButtonElement>('[data-ft-owned="long-post-toggle"]')?.hidden).toBe(false);
-  cardRect.mockReturnValue({ top: 220, bottom: 400, height: 180 } as DOMRect);
-  updateXLongPostFold(source);
-  expect(viewport.style.getPropertyValue('--ft-long-post-height')).toBe('none');
-  expect((viewport.nextElementSibling as HTMLElement).hidden).toBe(true);
+it.each([
+  ['First sentence.', 'First sentence. Hidden sentence.', 'First sentence.'],
+  ['Last sen…', 'Last sentence completes here. Hidden sentence.', 'Last sentence completes here.'],
+  ['Last sen...', 'Last sentence completes here. Hidden sentence.', 'Last sentence completes here.'],
+  ['Read Dr. Sm', 'Read Dr. Smith today. Hidden sentence.', 'Read Dr. Smith today.'],
+  ['→ 503 lessons → 20', '→ 503 lessons → 20 phases → Completely free\n\nHidden paragraph.', '→ 503 lessons → 20 phases → Completely free'],
+  ['First paragraph\n\n', 'First paragraph\n\nHidden paragraph.', 'First paragraph'],
+])('extends preview %s through its own sentence without pulling in the next one', (preview, text, expected) => {
+  const source = fixture({ text }); source.textContent = preview; posts = new XLongPosts();
+  expect(posts.prepare(source).textContent).toBe(expected);
+  expect(document.querySelector('[data-ft-long-remainder]')?.textContent).toBe('');
+});
+
+it('matches native line breaks and hides the toggle when completing the last sentence exhausts the note', () => {
+  const source = fixture({ text: 'First paragraph\n\nComplete final sentence.' }); source.innerHTML = 'First paragraph<br><br>Complete'; posts = new XLongPosts();
+  expect(posts.prepare(source).textContent).toBe('First paragraph\n\nComplete final sentence.');
   expect(document.querySelector<HTMLButtonElement>('[data-ft-owned="long-post-toggle"]')?.hidden).toBe(true);
+  expect(document.querySelector<HTMLElement>('[data-ft-owned="long-post-ellipsis"]')?.hidden).toBe(true);
+});
+
+it('preserves native expansion when the preview cannot be matched to the note', () => {
+  const source = fixture({ text: 'A different full text.' }); posts = new XLongPosts();
+  expect(posts.prepare(source)).toBe(source); expect(source.hasAttribute('data-ft-long-source')).toBe(false);
+  expect(document.querySelector('[data-ft-long-post]')).toBeNull();
 });

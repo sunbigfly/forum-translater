@@ -49,6 +49,18 @@ it('consumes post Escape before host shortcuts can navigate a second time', () =
     document.removeEventListener('keydown', laterCaptureShortcut, true);
   }
 });
+it.each(['/someone/status/123', '/i/web/status/123', '/i/thread/123'])('closes a native Post modal at %s on Escape while respecting nested dialogs and editors', pathname => {
+  vi.stubGlobal('location', { hostname: 'x.com', pathname });
+  document.body.innerHTML = '<main data-testid="primaryColumn"><button data-testid="app-bar-back">Feed back</button></main><div role="dialog"><div role="dialog" data-ft-x-native-post><div data-testid="primaryColumn"><button data-testid="app-bar-back">Post back</button><input></div></div></div>';
+  const back = document.querySelector('[data-ft-x-native-post] button'); const clicked = vi.fn(); back?.addEventListener('click', clicked);
+  const feedBack = vi.fn(); document.querySelector('main button')?.addEventListener('click', feedBack);
+  layout = new XLayout(DEFAULTS, vi.fn());
+  const escape = (): KeyboardEvent => new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  document.querySelector('input')?.dispatchEvent(escape()); expect(clicked).not.toHaveBeenCalled();
+  const nested = document.createElement('div'); nested.setAttribute('role', 'dialog'); back?.parentElement?.append(nested);
+  document.dispatchEvent(escape()); expect(clicked).not.toHaveBeenCalled(); nested.remove();
+  back?.dispatchEvent(escape()); expect(clicked).toHaveBeenCalledOnce(); expect(feedBack).not.toHaveBeenCalled();
+});
 it('collapses the X sidebar, restores it with the toggle and cleans up', () => {
   vi.stubGlobal('location', { hostname: 'x.com' }); const save = vi.fn();
   document.body.innerHTML = '<header role="banner"><h1><a href="/home">Home</a></h1><div><nav><a href="/home">Navigation</a></nav></div></header>';

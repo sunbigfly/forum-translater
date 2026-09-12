@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.3
+// @version      0.2.4
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -35,11 +35,160 @@
 /*! MIT (c) 2026 sunbigfly. Translation primitives adapted from Hacker News Reader Lite; see THIRD_PARTY_NOTICES.md. */
 "use strict";
 (() => {
+  // src/reddit.ts
+  var OWNED = "[data-ft-owned]";
+  var X_ARTICLE = '[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]';
+  var X_ARTICLE_BLOCK = '[data-block="true"],p,h1,h2,h3,h4,h5,h6,li,blockquote';
+  var RULES = [
+    ["title", 'shreddit-post [slot="title"], shreddit-post h1, .thing.link > .entry a.title, [data-testid="post-container"] [data-adclicklocation="title"] h3'],
+    ["title", '[data-testid="twitterArticleTitle"], [data-testid="twitter-article-title"]'],
+    // Observe article blocks separately: a whole-article owner starts every
+    // paragraph at once and rebuilds the entire document on each partial result.
+    ["body", `[data-testid="tweetText"], :is(${X_ARTICLE}) :is(${X_ARTICLE_BLOCK}), :is(${X_ARTICLE}):not(:has(:is(${X_ARTICLE_BLOCK})))`],
+    ["body", 'shreddit-post [slot="text-body"], shreddit-post [id$="-post-rtjson-content"], .thing.link > .entry .usertext-body > .md, [data-testid="post-container"] [data-click-id="text"]'],
+    ["comment", 'shreddit-comment [slot="comment"], .thing.comment > .entry .usertext-body > .md, [data-testid="comment"]']
+  ];
+  var EXCLUDE = `${OWNED},[data-image-insight-host],textarea,input,[contenteditable]:not([contenteditable="false"]),[slot="credit-bar"],shreddit-ad-post`;
+  function contentSelector(kind) {
+    return RULES.filter(([value]) => value === kind).map(([, selector]) => selector).join(",");
+  }
+  function discover(root) {
+    const found = /* @__PURE__ */ new Map();
+    for (const [kind, selector] of RULES) {
+      const elements = [...root.querySelectorAll(selector)];
+      if (root instanceof HTMLElement && root.matches(selector)) elements.unshift(root);
+      for (const element of elements) {
+        if (!element.closest(EXCLUDE)) found.set(element, kind);
+      }
+    }
+    return [...found].filter(([element]) => {
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) if (found.has(parent)) return false;
+      return true;
+    }).map(([element, kind]) => ({ element, kind }));
+  }
+  function isReadable(element) {
+    if (!element.isConnected || element.closest('[data-ft-duplicate],[hidden],[aria-hidden="true"],.collapsed,shreddit-comment[collapsed]:not([collapsed="false"]),shreddit-comment[aria-expanded="false"],details:not([open])')) return false;
+    return element.getClientRects().length > 0;
+  }
+  function sourceSnapshot(element, origins) {
+    const result = element.ownerDocument.createElement("div");
+    const skip = `${EXCLUDE},[hidden],[aria-hidden="true"],script,style,button,select,form,svg,img,video,audio,iframe`;
+    const allowed = /* @__PURE__ */ new Set(["p", "br", "ul", "ol", "li", "blockquote", "strong", "em", "b", "i", "s", "pre", "code", "kbd", "samp", "h1", "h2", "h3", "h4", "h5", "h6", "table", "tbody", "tr", "td", "th"]);
+    function visit(node2, parent) {
+      if (node2.nodeType === Node.TEXT_NODE) {
+        parent.appendChild(element.ownerDocument.createTextNode(node2.textContent ?? ""));
+        return;
+      }
+      if (!(node2 instanceof Element) || node2.matches(skip)) return;
+      const tag = node2.localName;
+      let clone = null;
+      if (tag === "a") {
+        const href = node2.getAttribute("href");
+        if (href) {
+          try {
+            const url = new URL(href, element.ownerDocument.baseURI);
+            if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
+              clone = element.ownerDocument.createElement("a");
+              clone.setAttribute("href", url.href);
+              clone.setAttribute("rel", "noopener noreferrer");
+              const source = node2.cloneNode(true);
+              source.querySelectorAll(OWNED).forEach((owned) => owned.remove());
+              const label = (source.textContent || "").trim();
+              clone.textContent = label;
+              clone.setAttribute("title", url.href);
+              parent.appendChild(clone);
+              origins?.set(clone, node2);
+              return;
+            }
+          } catch {
+          }
+        }
+      } else if (allowed.has(tag)) clone = element.ownerDocument.createElement(tag);
+      else if (tag === "div" && node2.matches('[data-block="true"],.public-DraftStyleDefault-block') && element.closest('[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]')) {
+        clone = element.ownerDocument.createElement("div");
+      }
+      if (clone) {
+        parent.appendChild(clone);
+        origins?.set(clone, node2);
+      }
+      for (const child of node2.childNodes) visit(child, clone ?? parent);
+    }
+    for (const child of element.childNodes) visit(child, result);
+    return result;
+  }
+  function contentIdentity(element) {
+    const tweet = element.closest('article[data-testid="tweet"]');
+    if (tweet) {
+      const href = tweet.querySelector("time")?.closest("a")?.getAttribute("href") ?? "";
+      const id = /\/status\/(\d+)(?:[/?#]|$)/.exec(href)?.[1];
+      if (id) return `x:status:${id}`;
+      if (href) return href;
+    }
+    if (element.closest('[data-testid="twitterArticleReadView"],[data-testid="twitterArticleTitle"],[data-testid="twitter-article-title"],[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]') && /(^|\.)(x|twitter)\.com$/.test(location.hostname)) {
+      const id = /^\/[^/]+\/(?:status|article)\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1];
+      if (id) return `x:status:${id}`;
+    }
+    const owner = element.closest('shreddit-comment,shreddit-post,.thing,[data-testid="post-container"],[data-testid="comment"]');
+    return owner?.getAttribute("thingid") ?? owner?.getAttribute("post-id") ?? owner?.getAttribute("id") ?? "";
+  }
+
+  // src/fonts.ts
+  var DEFAULT_FONTS = { title: { family: "", size: 0 }, body: { family: "", size: 0 } };
+  function normalizeFonts(raw) {
+    const result = { title: { ...DEFAULT_FONTS.title }, body: { ...DEFAULT_FONTS.body } };
+    for (const scope of ["title", "body"]) {
+      const entry = raw && typeof raw === "object" && scope in raw ? Reflect.get(raw, scope) : void 0;
+      if (!entry || typeof entry !== "object") continue;
+      const family = Reflect.get(entry, "family");
+      const size = Reflect.get(entry, "size");
+      if (typeof family === "string" && !new RegExp("\\p{Cc}", "u").test(family)) result[scope].family = family.trim().slice(0, 200);
+      if (typeof size === "number" && Number.isFinite(size) && size > 0) result[scope].size = Math.max(10, Math.min(72, Math.round(size)));
+    }
+    return result;
+  }
+  function fontFamilyCss(family) {
+    if (!family) return "inherit";
+    if (["system-ui", "sans-serif", "serif", "monospace"].includes(family)) return family;
+    return `"${family.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}", system-ui, sans-serif`;
+  }
+  var headings = ':is([data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]) :is(h1,h2,h3,h4,h5,h6)';
+  var excluded = 'pre,code,kbd,samp,button,input,textarea,select,svg,[contenteditable]:not([contenteditable="false"]),[data-ft-owned]:not([data-ft-owned="translation"])';
+  function fontTargets(scope) {
+    const source = scope === "title" ? `${contentSelector("title")},${headings}` : `${contentSelector("body")},${contentSelector("comment")}`;
+    const translation = scope === "title" ? '[data-ft-owned="translation"].ft-translation-title,[data-ft-owned="translation"][data-ft-font="title"]' : '[data-ft-owned="translation"]:not(.ft-translation-title):not([data-ft-font="title"])';
+    return `:is(${source},${translation}):not(:is(${excluded},:is(${excluded}) *))`;
+  }
+  function fontStyles(raw) {
+    const settings = normalizeFonts(raw);
+    const rules = [];
+    for (const scope of ["body", "title"]) {
+      const target = fontTargets(scope);
+      const choice = settings[scope];
+      if (choice.family) rules.push(`:where(${target},${target} *):not(:where(${excluded},:is(${excluded}) *)){font-family:${fontFamilyCss(choice.family)}!important}`);
+      if (choice.size) {
+        const skip = scope === "body" ? `${excluded},h1,h2,h3,h4,h5,h6,.ft-translation-title,[data-ft-font="title"]` : excluded;
+        rules.push(`:where(${target},${target} *):not(:where(${skip},:is(${skip}) *)){font-size:${choice.size}px!important;line-height:1.6!important}`);
+      }
+    }
+    return rules.length ? `@layer ft-typography {${rules.join("\n")}}` : "";
+  }
+  function mountFontStyles(settings) {
+    const style = document.createElement("style");
+    style.dataset.ftOwned = "font-style";
+    document.head.append(style);
+    const update = (next) => {
+      const css = fontStyles(next);
+      if (style.textContent !== css) style.textContent = css;
+    };
+    update(settings);
+    return { update, destroy: () => style.remove() };
+  }
+
   // src/settings.ts
   var TRANSLATION_THEMES = { quote: "淡灰引用", plain: "自然正文", weakening: "弱化译文", "dividing-line": "分隔线", underline: "下划线", highlight: "柔和高亮", paper: "纸张卡片" };
-  var DEFAULTS = { xHideAds: true, xCollapseSidebar: true, xHideFloatingIcons: true, xHideRightSidebar: true, translationTheme: "quote", translationOnly: false, enabled: true, title: true, body: true, comment: true, vocabulary: true, before: 600, after: 1200, provider: "google", ai: { baseUrl: "", apiKey: "", model: "", prompt: "", requestsPerMinute: 30, tokensPerMinute: 0, reasoningEffort: "low", fastMode: false } };
+  var DEFAULTS = { fonts: DEFAULT_FONTS, xHideAds: true, xCollapseSidebar: true, xHideFloatingIcons: true, xHideRightSidebar: true, translationTheme: "quote", translationOnly: false, enabled: true, title: true, body: true, comment: true, vocabulary: true, before: 600, after: 1200, provider: "google", ai: { baseUrl: "", apiKey: "", model: "", prompt: "", requestsPerMinute: 30, tokensPerMinute: 0, reasoningEffort: "low", fastMode: false } };
   function normalizeSettings(raw) {
-    const value = { ...DEFAULTS, ai: { ...DEFAULTS.ai } };
+    const value = { ...DEFAULTS, fonts: normalizeFonts(raw.fonts), ai: { ...DEFAULTS.ai } };
     value.ai.reasoningEffort = raw.ai?.reasoningEffort === "none" ? "none" : "low";
     value.ai.fastMode = raw.ai?.fastMode === true;
     for (const key of ["baseUrl", "apiKey", "model", "prompt"]) if (typeof raw.ai?.[key] === "string") value.ai[key] = raw.ai[key].trim();
@@ -100,84 +249,6 @@
   }
   function saveTranslationOnly(value, url) {
     GM_setValue(displayKey(url), value);
-  }
-
-  // src/reddit.ts
-  var OWNED = "[data-ft-owned]";
-  var RULES = [
-    ["title", 'shreddit-post [slot="title"], shreddit-post h1, .thing.link > .entry a.title, [data-testid="post-container"] [data-adclicklocation="title"] h3'],
-    ["body", 'article[data-testid="tweet"] [data-testid="tweetText"]'],
-    ["body", 'shreddit-post [slot="text-body"], shreddit-post [id$="-post-rtjson-content"], .thing.link > .entry .usertext-body > .md, [data-testid="post-container"] [data-click-id="text"]'],
-    ["comment", 'shreddit-comment [slot="comment"], .thing.comment > .entry .usertext-body > .md, [data-testid="comment"]']
-  ];
-  var EXCLUDE = `${OWNED},[data-image-insight-host],textarea,input,[contenteditable]:not([contenteditable="false"]),[slot="credit-bar"],shreddit-ad-post`;
-  function discover(root) {
-    const found = /* @__PURE__ */ new Map();
-    for (const [kind, selector] of RULES) {
-      const elements = [...root.querySelectorAll(selector)];
-      if (root instanceof HTMLElement && root.matches(selector)) elements.unshift(root);
-      for (const element of elements) {
-        if (!element.closest(EXCLUDE)) found.set(element, kind);
-      }
-    }
-    return [...found].filter(([element]) => ![...found.keys()].some((other) => other !== element && other.contains(element))).map(([element, kind]) => ({ element, kind }));
-  }
-  function isReadable(element) {
-    if (!element.isConnected || element.closest('[data-ft-duplicate],[hidden],[aria-hidden="true"],.collapsed,shreddit-comment[collapsed]:not([collapsed="false"]),shreddit-comment[aria-expanded="false"],details:not([open])')) return false;
-    return element.getClientRects().length > 0;
-  }
-  function sourceSnapshot(element, origins) {
-    const result = element.ownerDocument.createElement("div");
-    const skip = `${EXCLUDE},[hidden],[aria-hidden="true"],script,style,button,select,form,svg,img,video,audio,iframe`;
-    const allowed = /* @__PURE__ */ new Set(["p", "br", "ul", "ol", "li", "blockquote", "strong", "em", "b", "i", "s", "pre", "code", "kbd", "samp", "h1", "h2", "h3", "h4", "table", "tbody", "tr", "td", "th"]);
-    function visit(node2, parent) {
-      if (node2.nodeType === Node.TEXT_NODE) {
-        parent.appendChild(element.ownerDocument.createTextNode(node2.textContent ?? ""));
-        return;
-      }
-      if (!(node2 instanceof Element) || node2.matches(skip)) return;
-      const tag = node2.localName;
-      let clone = null;
-      if (tag === "a") {
-        const href = node2.getAttribute("href");
-        if (href) {
-          try {
-            const url = new URL(href, element.ownerDocument.baseURI);
-            if (["https:", "http:"].includes(url.protocol) && !url.username && !url.password) {
-              clone = element.ownerDocument.createElement("a");
-              clone.setAttribute("href", url.href);
-              clone.setAttribute("rel", "noopener noreferrer");
-              const source = node2.cloneNode(true);
-              source.querySelectorAll(OWNED).forEach((owned) => owned.remove());
-              const label = (source.textContent || "").trim();
-              clone.textContent = label;
-              clone.setAttribute("title", url.href);
-              parent.appendChild(clone);
-              origins?.set(clone, node2);
-              return;
-            }
-          } catch {
-          }
-        }
-      } else if (allowed.has(tag)) clone = element.ownerDocument.createElement(tag);
-      if (clone) {
-        parent.appendChild(clone);
-        origins?.set(clone, node2);
-      }
-      for (const child of node2.childNodes) visit(child, clone ?? parent);
-    }
-    for (const child of element.childNodes) visit(child, result);
-    return result;
-  }
-  function contentIdentity(element) {
-    const tweet = element.closest('article[data-testid="tweet"]');
-    if (tweet) {
-      const href = tweet.querySelector("time")?.closest("a")?.getAttribute("href") ?? "";
-      const id = /\/status\/(\d+)(?:[/?#]|$)/.exec(href)?.[1];
-      return id ? `x:status:${id}` : href;
-    }
-    const owner = element.closest('shreddit-comment,shreddit-post,.thing,[data-testid="post-container"],[data-testid="comment"]');
-    return owner?.getAttribute("thingid") ?? owner?.getAttribute("post-id") ?? owner?.getAttribute("id") ?? "";
   }
 
   // src/reddit-context.ts
@@ -416,9 +487,9 @@
   var PREFIX = "ft:wordbook-detail:v1:";
   function cachedWordData(source, word, valid) {
     try {
-      const data = GM_getValue(`${PREFIX}${source}:${word.toLowerCase()}`, null);
-      if (!data || typeof data !== "object") return;
-      const entry = data;
+      const data2 = GM_getValue(`${PREFIX}${source}:${word.toLowerCase()}`, null);
+      if (!data2 || typeof data2 !== "object") return;
+      const entry = data2;
       if (entry.version === 1 && typeof entry.savedAt === "number" && valid(entry.value)) return { version: 1, savedAt: entry.savedAt, value: entry.value };
     } catch {
     }
@@ -461,7 +532,16 @@
     for (const kind of new Set(samples.map((sample) => sample.kind))) {
       const group = samples.filter((sample) => sample.kind === kind);
       const times = group.map((sample) => sample.durationMs).sort((a2, b) => a2 - b);
-      summary[kind] = { count: group.length, failures: group.filter((sample) => !sample.success).length, p50Ms: times[Math.max(0, Math.ceil(times.length * 0.5) - 1)] ?? 0, p95Ms: times[Math.max(0, Math.ceil(times.length * 0.95) - 1)] ?? 0, reportedUsage: group.filter((sample) => sample.inputTokens !== void 0).length };
+      const first = group.flatMap((sample) => sample.firstContentMs === void 0 ? [] : [sample.firstContentMs]).sort((a2, b) => a2 - b);
+      summary[kind] = {
+        count: group.length,
+        failures: group.filter((sample) => !sample.success).length,
+        p50Ms: times[Math.max(0, Math.ceil(times.length * 0.5) - 1)] ?? 0,
+        p95Ms: times[Math.max(0, Math.ceil(times.length * 0.95) - 1)] ?? 0,
+        reportedUsage: group.filter((sample) => sample.inputTokens !== void 0).length,
+        firstContentCount: first.length,
+        ...first.length ? { firstContentP50Ms: first[Math.ceil(first.length * 0.5) - 1] ?? 0, firstContentP95Ms: first[Math.ceil(first.length * 0.95) - 1] ?? 0 } : {}
+      };
     }
     return { samples: samples.map((value) => ({ ...value })), cacheHits: { ...hits }, summary };
   }
@@ -842,8 +922,11 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
       cursor = value.next;
     }
   }
+  function responseFailure(error, fallback) {
+    return new Error(error?.type === "usage_limit_reached" || error?.code === "usage_limit_reached" ? "当前模型额度已用尽（usage_limit_reached），请切换可用模型或等待额度恢复" : fallback);
+  }
   function decodeResponseOutput(payload) {
-    if (payload.status === "failed" || payload.status === "incomplete" || payload.error) throw new Error("AI 响应未完成");
+    if (payload.status === "failed" || payload.status === "incomplete" || payload.error) throw responseFailure(payload.error, "AI 响应未完成");
     const content = (payload.output ?? []).flatMap((item) => item.type === "message" ? (item.content ?? []).flatMap((part) => part.type === "output_text" && typeof part.text === "string" ? [part.text] : []) : []).join("");
     if (!content.trim()) {
       throw new Error("AI 未返回文本结果");
@@ -865,6 +948,9 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
     #done = false;
     get done() {
       return this.#done;
+    }
+    get content() {
+      return this.#content;
     }
     push(body, final = false) {
       const chunk = body.startsWith(this.#received) ? body.slice(this.#received.length) : body;
@@ -892,13 +978,13 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
     #consumeEvent(event) {
       for (const line of event.split(/\r?\n/)) {
         if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data) continue;
-        if (data === "[DONE]") {
+        const data2 = line.slice(5).trim();
+        if (!data2) continue;
+        if (data2 === "[DONE]") {
           this.#done = true;
           continue;
         }
-        const payload = JSON.parse(data);
+        const payload = JSON.parse(data2);
         if (payload.response?.usage) this.onUsage?.(payload.response.usage);
         if (payload.type === "response.output_text.delta" && typeof payload.delta === "string") {
           this.#publish(this.#content + payload.delta);
@@ -907,7 +993,7 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
         } else if (payload.type === "response.completed" && payload.response && !this.#content) {
           this.#publish(decodeResponseOutput(payload.response));
         } else if (payload.type === "response.failed" || payload.type === "response.incomplete" || payload.type === "error") {
-          this.#failure = new Error("AI 响应失败");
+          this.#failure = responseFailure(payload.response?.error ?? payload.error ?? payload, "AI 响应失败");
         }
         if (payload.type === "response.completed" || payload.type === "response.failed") this.#done = true;
       }
@@ -958,15 +1044,38 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
       sections.forEach((section, index) => section.onVocabulary?.(words2.filter((word) => word && typeof word === "object" && "section" in word && word.section === `section_${index}`), complete));
     };
     const entries = sections.map((section, index) => ({ id: `section_${index}`, text: section.text, before: section.context?.before ?? "", after: section.context?.after ?? "" }));
+    const published = /* @__PURE__ */ new Map();
+    let markContent;
+    const publishTranslation = (index, value, complete) => {
+      const previous = published.get(index);
+      if (previous?.value === value && previous.complete === complete) return;
+      published.set(index, { value, complete });
+      markContent?.();
+      onPartial?.(index, value, complete);
+    };
+    const preserveCompletedTranslations = (raw) => {
+      const partials = streamedJsonRecord(raw);
+      entries.forEach((entry, index) => {
+        const partial = partials[entry.id];
+        if (partial?.complete && partial.value.trim() && translationProtectedTokensMatch(entry.text, partial.value)) publishTranslation(index, partial.value, true);
+      });
+    };
     const decodeValues = (raw) => {
       const values = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-      if (!values || typeof values !== "object" || Array.isArray(values) || Object.keys(values).length !== entries.length + Number(combined)) throw new Error("AI 译文段落不匹配");
+      if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error("AI 译文段落不匹配");
       const record3 = values;
-      const translations = entries.map((entry) => {
+      let invalidTranslation = false;
+      const translations = entries.map((entry, index) => {
         const value = record3[entry.id];
-        if (typeof value !== "string" || !value.trim() || !translationProtectedTokensMatch(entry.text, value)) throw new Error("AI 译文占位符不匹配");
+        if (typeof value !== "string" || !value.trim() || !translationProtectedTokensMatch(entry.text, value)) {
+          invalidTranslation = true;
+          return "";
+        }
+        publishTranslation(index, value, true);
         return value;
       });
+      if (Object.keys(values).length !== entries.length + Number(combined)) throw new Error("AI 译文段落不匹配");
+      if (invalidTranslation) throw new Error("AI 译文占位符不匹配");
       if (combined) {
         if (!Array.isArray(record3.vocabulary)) throw new Error("AI 词汇格式不匹配");
         publishWords(record3.vocabulary, true);
@@ -978,7 +1087,8 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
       let settled = false;
       let handle;
       const metric = measureRequest("translation", { sections: sections.length, model: ai.model, effort: ai.reasoningEffort ?? "low", fast: ai.fastMode === true });
-      const stream = new ResponseStreamDecoder(() => metric.content(), (usage) => metric.usage(usage));
+      markContent = () => metric.content();
+      const stream = new ResponseStreamDecoder(() => metric.milestone("first-output-delta"), (usage) => metric.usage(usage));
       const finish = (action2) => {
         if (settled) return;
         settled = true;
@@ -1060,7 +1170,8 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
             entries.forEach((entry, index) => {
               const partial = partials[entry.id]?.value;
               const complete = partials[entry.id]?.complete === true;
-              if (partial && (!complete || translationProtectedTokensMatch(entry.text, partial))) onPartial?.(index, partial, complete);
+              if (!partial?.replace(/⟦[^⟧]*$/, "").trim() || complete && !translationProtectedTokensMatch(entry.text, partial)) return;
+              publishTranslation(index, partial, complete);
             });
             let values;
             try {
@@ -1073,6 +1184,7 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
             finish(() => resolve(values));
             handle?.abort();
           } catch (error) {
+            preserveCompletedTranslations(stream.content);
             finish(() => reject(error instanceof Error && !(error instanceof SyntaxError) ? error : new Error("AI 流式 JSON 无法解析")));
             handle?.abort();
           }
@@ -1102,9 +1214,11 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
               if (isStream && !stream.done) throw new Error("AI 响应未完整结束");
               if (!isStream) metric.usage(JSON.parse(response.responseText).usage);
               const values = decodeValues(raw);
+              metric.content();
               metric.finish(true);
               resolve(values);
             } catch (error) {
+              preserveCompletedTranslations(stream.content);
               reject(error instanceof Error && !(error instanceof SyntaxError) ? error : new Error("AI 返回的 JSON 无法解析"));
             }
           });
@@ -1401,39 +1515,47 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     const text2 = source.slice(0, 18e3);
     const key = await translationTextFingerprint([VOCABULARY_PROMPT_VERSION, settings.ai.baseUrl, settings.ai.model, text2, translation], crypto.subtle);
     signal.throwIfAborted();
-    const cached = GM_getValue(CACHE, []);
-    const cache = Array.isArray(cached) ? cached : [];
-    const hit = cache.find((item) => Array.isArray(item) && item[0] === key);
-    if (Array.isArray(hit)) {
+    const cachedResult = () => {
+      const cached2 = GM_getValue(CACHE, []);
+      const hit = Array.isArray(cached2) ? cached2.find((item) => Array.isArray(item) && item[0] === key) : void 0;
+      if (!Array.isArray(hit)) return;
       const result2 = words(hit[1]);
       if (result2.length || typeof hit[2] === "number" && hit[2] > Date.now()) {
         cacheHit("vocabulary");
         return result2;
       }
-    }
+    };
+    const cached = cachedResult();
+    if (cached !== void 0) return cached;
     scheduling?.queued(`vocabulary:${key}`);
-    const result = await withTranslationRetry(() => tasks.request({ key: `vocabulary:${key}`, serviceKey: `ai:${normalizeAiBaseUrl(settings.ai.baseUrl)}:${settings.ai.model}`, priority: scheduling?.priority() ?? "prefetch", signal, quota: settings.ai, estimatedTokens: Math.ceil((text2.length + translation.slice(0, 18e3).length + VOCABULARY_PROMPT.length) * 1.5) }, async (requestSignal) => {
-      const response = await requestVocabularyText(`${normalizeAiBaseUrl(settings.ai.baseUrl)}/responses`, requestSignal, {
-        model: settings.ai.model,
-        store: false,
-        stream: true,
-        reasoning: { effort: settings.ai.reasoningEffort ?? "low" },
-        ...settings.ai.fastMode ? { service_tier: "priority" } : {},
-        max_output_tokens: 2400,
-        prompt_cache_key: `forum-translater:${VOCABULARY_PROMPT_VERSION}`,
-        input: [
-          { role: "system", content: VOCABULARY_PROMPT },
-          { role: "user", content: JSON.stringify({ original: text2, translation: translation.slice(0, 18e3) }) }
-        ]
-      }, settings.ai.apiKey, (partial) => {
-        if (!signal.aborted) onPartial?.(normalize(completedVocabularyEntries(partial)));
+    const result = await withTranslationRetry(async () => {
+      const reused = cachedResult();
+      if (reused !== void 0) return reused;
+      return tasks.request({ key: `vocabulary:${key}`, serviceKey: `ai:${normalizeAiBaseUrl(settings.ai.baseUrl)}:${settings.ai.model}`, priority: scheduling?.priority() ?? "prefetch", signal, quota: settings.ai, estimatedTokens: Math.ceil((text2.length + translation.slice(0, 18e3).length + VOCABULARY_PROMPT.length) * 1.5) }, async (requestSignal) => {
+        const reused2 = cachedResult();
+        if (reused2 !== void 0) return reused2;
+        const response = await requestVocabularyText(`${normalizeAiBaseUrl(settings.ai.baseUrl)}/responses`, requestSignal, {
+          model: settings.ai.model,
+          store: false,
+          stream: true,
+          reasoning: { effort: settings.ai.reasoningEffort ?? "low" },
+          ...settings.ai.fastMode ? { service_tier: "priority" } : {},
+          max_output_tokens: 2400,
+          prompt_cache_key: `forum-translater:${VOCABULARY_PROMPT_VERSION}`,
+          input: [
+            { role: "system", content: VOCABULARY_PROMPT },
+            { role: "user", content: JSON.stringify({ original: text2, translation: translation.slice(0, 18e3) }) }
+          ]
+        }, settings.ai.apiKey, (partial) => {
+          if (!signal.aborted) onPartial?.(normalize(completedVocabularyEntries(partial)));
+        });
+        const decoded = JSON.parse(response.replace(/^```(?:json)?\s*|\s*```$/g, ""));
+        if (!Array.isArray(decoded)) throw new Error("词汇响应格式错误");
+        const normalized = normalize(decoded);
+        measureRequest("vocabulary-result", { received: decoded.length, accepted: normalized.length }).finish(true);
+        return normalized;
       });
-      const decoded = JSON.parse(response.replace(/^```(?:json)?\s*|\s*```$/g, ""));
-      if (!Array.isArray(decoded)) throw new Error("词汇响应格式错误");
-      const normalized = normalize(decoded);
-      measureRequest("vocabulary-result", { received: decoded.length, accepted: normalized.length }).finish(true);
-      return normalized;
-    }), signal);
+    }, signal);
     signal.throwIfAborted();
     const latest = GM_getValue(CACHE, []);
     const entries = Array.isArray(latest) ? latest : [];
@@ -1534,12 +1656,12 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     } else if (settings.provider === "google") {
       const url = new URL("https://translate.googleapis.com/translate_a/t");
       for (const [key, val] of Object.entries({ client: "dict-chrome-ex", sl: "auto", tl: "zh-CN", q: source })) url.searchParams.set(key, val);
-      const data = await requestJson(url.href, signal);
-      value = Array.isArray(data) ? Array.isArray(data[0]) ? data[0][0] : data[0] : void 0;
+      const data2 = await requestJson(url.href, signal);
+      value = Array.isArray(data2) ? Array.isArray(data2[0]) ? data2[0][0] : data2[0] : void 0;
     } else if (settings.provider === "microsoft") {
       const token = await microsoftToken(signal);
-      const data = await requestJson("https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=zh-Hans", signal, [{ Text: source }], token);
-      const translations = record(Array.isArray(data) ? data[0] : void 0).translations;
+      const data2 = await requestJson("https://api-edge.cognitive.microsofttranslator.com/translate?api-version=3.0&to=zh-Hans", signal, [{ Text: source }], token);
+      const translations = record(Array.isArray(data2) ? data2[0] : void 0).translations;
       value = record(Array.isArray(translations) ? translations[0] : void 0).text;
     }
     return validateTranslation(source, value);
@@ -1672,8 +1794,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     signal.throwIfAborted();
     const hit = cachedWordData("wiktionary", word, validEntries);
     if (hit) return hit.value;
-    const data = record2(await dictionaryRequest(`https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word)}`, signal));
-    const meanings = array(data.en).map((value) => {
+    const data2 = record2(await dictionaryRequest(`https://en.wiktionary.org/api/rest_v1/page/definition/${encodeURIComponent(word)}`, signal));
+    const meanings = array(data2.en).map((value) => {
       const item = record2(value);
       return { partOfSpeech: text(item.partOfSpeech), definitions: array(item.definitions).slice(0, 20).map((value2) => {
         const definition = record2(value2);
@@ -1696,9 +1818,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     if (hit && (hit.value.length || Date.now() - hit.savedAt < 864e5)) return hit.value;
     const url = new URL("https://api.tatoeba.org/v1/sentences");
     for (const [key, value] of Object.entries({ sort: "relevance", lang: "eng", q: `"${word}"`, "trans:lang": "cmn", "trans:is_direct": "yes", "trans:is_unapproved": "no", "trans:is_orphan": "no", is_unapproved: "no", is_orphan: "no", showtrans: "matching", limit: "10" })) url.searchParams.set(key, value);
-    const data = record2(await dictionaryRequest(url.href, signal));
-    if (!Array.isArray(data.data)) throw new Error("例句响应格式错误");
-    const examples = data.data.flatMap((value) => {
+    const data2 = record2(await dictionaryRequest(url.href, signal));
+    if (!Array.isArray(data2.data)) throw new Error("例句响应格式错误");
+    const examples = data2.data.flatMap((value) => {
       const sentence = record2(value);
       const translation = array(sentence.translations).map(record2).find((item) => item.lang === "cmn" && text(item.text));
       if (!translation || typeof sentence.id !== "number" || typeof translation.id !== "number" || !text(sentence.text)) return [];
@@ -2652,54 +2774,20 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     if (typeof text2 !== "string" || !text2.trim()) return;
     return text2;
   }
-  var pendingFolds = /* @__PURE__ */ new WeakSet();
-  function updateXLongPostFold(element) {
-    const viewport = element.closest(".ft-long-post-viewport");
-    if (!viewport || pendingFolds.has(viewport)) return;
-    pendingFolds.add(viewport);
-    requestAnimationFrame(() => {
-      pendingFolds.delete(viewport);
-      if (!viewport.isConnected) return;
-      const frame = viewport.getBoundingClientRect();
-      if (frame.width <= 0) return;
-      const top = frame.top;
-      const limit = top + 320;
-      let bottom = top;
-      let contentBottom = top;
-      for (const box of viewport.querySelectorAll('[data-ft-owned="translation"]')) {
-        if (box.hidden) continue;
-        const rect = box.getBoundingClientRect();
-        if (rect.height > 0) contentBottom = Math.max(contentBottom, rect.bottom);
-        if (rect.height > 0 && rect.bottom <= limit) bottom = Math.max(bottom, rect.bottom);
-      }
-      const walker = document.createTreeWalker(viewport, NodeFilter.SHOW_TEXT);
-      for (let node2 = walker.nextNode(); node2; node2 = walker.nextNode()) {
-        if (!node2.textContent?.trim() || node2.parentElement?.closest('[data-ft-owned="translation"],[data-ft-original-hidden]')) continue;
-        const range = document.createRange();
-        range.selectNodeContents(node2);
-        for (const rect of range.getClientRects()) {
-          if (rect.height > 0) contentBottom = Math.max(contentBottom, rect.bottom);
-          if (rect.height > 0 && rect.bottom <= limit) bottom = Math.max(bottom, rect.bottom);
-        }
-      }
-      const height = Math.max(0, Math.ceil(bottom - top));
-      const overflowing = contentBottom - top > height + 1;
-      const value = overflowing ? `${height}px` : "none";
-      if (viewport.style.getPropertyValue("--ft-long-post-height") !== value) viewport.style.setProperty("--ft-long-post-height", value);
-      const ellipsis = viewport.nextElementSibling;
-      if (ellipsis instanceof HTMLElement) ellipsis.hidden = !overflowing;
-      const button2 = viewport.parentElement?.querySelector(':scope > [data-ft-owned="long-post-toggle"]');
-      if (button2) button2.hidden = !overflowing;
-    });
+  function previewText(source, fullText) {
+    const snapshot = sourceSnapshot(source);
+    for (const br of snapshot.querySelectorAll("br")) br.replaceWith("\n");
+    const prefix = (snapshot.textContent ?? "").replace(/\r\n?/g, "\n").trim().replace(/(?:…|\.{3})$/, "").trimEnd();
+    if (!prefix || !fullText.startsWith(prefix)) return;
+    for (const segment of new Intl.Segmenter(void 0, { granularity: "sentence" }).segment(fullText)) {
+      const end = segment.index + segment.segment.trimEnd().length;
+      if (end < prefix.length) continue;
+      const lineEnd = fullText.indexOf("\n", prefix.length);
+      return fullText.slice(0, lineEnd < 0 ? end : Math.min(end, lineEnd)).trimEnd();
+    }
   }
   var XLongPosts = class {
     posts = /* @__PURE__ */ new Map();
-    constructor() {
-      window.addEventListener("resize", this.resize);
-    }
-    resize = () => {
-      for (const post of this.posts.values()) updateXLongPostFold(post.body);
-    };
     prepare(source) {
       if (!source.matches('[data-testid="tweetText"]') || source.closest("[data-ft-long-post]")) return source;
       const existing = this.posts.get(source);
@@ -2713,8 +2801,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       if (article?.querySelector('[data-testid="tweetText"]') !== source) return source;
       const more = source.parentElement?.querySelector(':scope > [data-testid="tweet-text-show-more-link"]');
       if (!more) return source;
-      const text2 = fullPostText(source);
+      const text2 = fullPostText(source)?.replace(/\r\n?/g, "\n").trim();
       if (!text2) return source;
+      const preview = previewText(source, text2);
+      if (!preview) return source;
+      const remaining = text2.slice(preview.length).trimStart();
       const wrapper = document.createElement("div");
       wrapper.dataset.ftLongPost = "";
       const viewport = document.createElement("div");
@@ -2722,16 +2813,28 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const body = document.createElement("div");
       body.dataset.testid = "tweetText";
       body.lang = source.lang;
-      body.textContent = text2;
+      body.textContent = preview;
+      const remainder = document.createElement("div");
+      remainder.dataset.ftLongRemainder = "";
+      remainder.hidden = true;
       const button2 = document.createElement("button");
       button2.type = "button";
       button2.dataset.ftOwned = "long-post-toggle";
       button2.textContent = "Show more";
       button2.setAttribute("aria-expanded", "false");
+      button2.hidden = !remaining;
       button2.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
         const expanded = wrapper.toggleAttribute("data-expanded");
+        if (expanded && !remainder.childNodes.length) {
+          const tail = document.createElement("div");
+          tail.dataset.testid = "tweetText";
+          tail.lang = source.lang;
+          tail.textContent = remaining;
+          remainder.append(tail);
+        }
+        remainder.hidden = !expanded;
         button2.setAttribute("aria-expanded", String(expanded));
         button2.textContent = expanded ? "Show less" : "Show more";
       };
@@ -2739,10 +2842,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       ellipsis.dataset.ftOwned = "long-post-ellipsis";
       ellipsis.textContent = "…";
       ellipsis.setAttribute("aria-hidden", "true");
-      viewport.append(body);
+      ellipsis.hidden = !remaining;
+      viewport.append(body, remainder);
       wrapper.append(viewport, ellipsis, button2);
       source.after(wrapper);
-      updateXLongPostFold(body);
       source.setAttribute("data-ft-long-source", "");
       more.setAttribute("data-ft-long-more", "");
       this.posts.set(source, { source, body, wrapper, more, signature, identity });
@@ -2762,8 +2865,126 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.posts.delete(post.source);
     }
     destroy() {
-      window.removeEventListener("resize", this.resize);
       for (const post of this.posts.values()) this.remove(post);
+    }
+  };
+
+  // src/x-post-modal.ts
+  var data = (value) => value !== null && (typeof value === "object" || typeof value === "function") ? value : void 0;
+  var isXPostPath = (path) => /^\/(?:[^/]+\/status|i\/web\/status|i\/thread)\/\d+\/?$/.test(path);
+  var isPost = () => isXPostPath(location.pathname ?? "");
+  var marker = "data-ft-x-native-post";
+  var backgroundMarker = "data-ft-x-post-background";
+  function isXPostBackground(element) {
+    const background = element.closest(`[${backgroundMarker}]`);
+    return element.isConnected && !!background && (isPost() && background.getAttribute(backgroundMarker) !== location.pathname || !!background.closest('[aria-hidden="true"]'));
+  }
+  function isXPostBackgroundRoute(element) {
+    return element.isConnected && element.closest(`[${backgroundMarker}]`)?.getAttribute(backgroundMarker) === location.pathname;
+  }
+  function containingArray(items, route2, depth = 0) {
+    if (items.includes(route2)) return items;
+    if (depth >= 8) return;
+    for (const item of items) {
+      if (!Array.isArray(item)) continue;
+      const found = containingArray(item, route2, depth + 1);
+      if (found) return found;
+    }
+  }
+  var XPostModal = class {
+    patches = [];
+    root;
+    surface;
+    reconcile() {
+      const root = [...document.querySelectorAll('[data-testid="primaryColumn"]')].find((node2) => !node2.closest('[role="dialog"]'));
+      if (root && root !== this.root) {
+        for (const patch of this.patches) {
+          const extra = patch.extra;
+          if (!extra || patch.route.type !== patch.installedType || patch.route.props !== patch.installed) continue;
+          patch.route.type = extra.route.type;
+          patch.installedType = extra.route.type;
+          patch.route.props = extra.modalProps;
+          patch.installed = extra.modalProps;
+          const index = extra.parent.indexOf(extra.route);
+          if (index >= 0) extra.parent.splice(index, 1);
+          delete patch.extra;
+        }
+        this.install(root);
+      }
+      const surface = isPost() && this.patches.length ? [...document.querySelectorAll('[role="dialog"] [data-testid="primaryColumn"]')].find((node2) => node2.querySelector('[data-testid="app-bar-back"]'))?.closest('[role="dialog"]') ?? void 0 : void 0;
+      if (surface !== this.surface) {
+        this.surface?.removeAttribute(marker);
+        this.surface = surface;
+        surface?.setAttribute(marker, "");
+      }
+    }
+    install(root) {
+      const property = Object.keys(root).find((name) => name.startsWith("__reactFiber$"));
+      let fiber = data(property ? Reflect.get(root, property) : void 0);
+      for (let depth = 0; fiber && depth < 100; depth++, fiber = data(fiber.return)) {
+        const children = data(fiber.memoizedProps)?.children;
+        if (!Array.isArray(children)) continue;
+        const routes = children.flat(8).map(data).filter((route2) => !!route2);
+        const modalType = routes.find((route2) => {
+          const defaults = data(data(route2.type)?.defaultProps);
+          return defaults?.restoreBackgroundFromPreviousPath === true && typeof defaults.shouldRenderAsModal === "function";
+        })?.type;
+        if (!modalType) continue;
+        const posts = routes.filter((route2) => {
+          const props = data(route2.props);
+          return typeof route2.key === "string" && /permalink[123]$/.test(route2.key) && props?.exact === true && typeof props.path === "string" && /\/(?:status|thread)\/:statusId/.test(props.path) && !!props.component;
+        });
+        if (!posts.length) continue;
+        for (const route2 of posts) {
+          if (this.patches.some((patch2) => patch2.route === route2) || route2.type === modalType) continue;
+          if (!Object.getOwnPropertyDescriptor(route2, "type")?.writable || !Object.getOwnPropertyDescriptor(route2, "props")?.writable) continue;
+          const props = data(route2.props);
+          const installed = { ...props, modalSize: "full", withBackground: true, disableAnimation: true, shouldAlwaysDisplayModal: () => true };
+          const patch = { route: route2, type: route2.type, props: route2.props, installedType: modalType, installed };
+          const path = String(props?.path);
+          const alias = path.startsWith("/i/web/status/") ? "/i/web/status/" : path.startsWith("/i/thread/") ? "/i/thread/" : void 0;
+          const initialPost = !this.root && isPost() && (alias ? location.pathname.startsWith(alias) : !/^\/i\/(web\/status|thread)\//.test(location.pathname));
+          if (initialPost) {
+            const parent = containingArray(children, route2);
+            if (!parent || Object.isFrozen(parent) || Object.isSealed(parent)) continue;
+            const id = /\/(\d+)\/?$/.exec(location.pathname)?.[1];
+            if (!id) continue;
+            const extra = { ...route2, key: `${String(route2.key)}:ft-modal`, type: modalType, props: installed };
+            patch.installedType = route2.type;
+            patch.installed = { ...props, path: path.replace(/:statusId(?:\([^)]*\))?/, `:statusId(${id})`) };
+            patch.extra = { parent, route: extra, modalProps: installed };
+            parent.splice(parent.indexOf(route2) + 1, 0, extra);
+          }
+          route2.type = patch.installedType;
+          route2.props = patch.installed;
+          this.patches.push(patch);
+        }
+        if (this.patches.length) {
+          document.documentElement.setAttribute("data-ft-x-post-layout", "");
+          this.root?.removeAttribute(backgroundMarker);
+          this.root = root;
+          root.setAttribute(backgroundMarker, location.pathname);
+        }
+        return;
+      }
+    }
+    destroy() {
+      document.documentElement.removeAttribute("data-ft-x-post-layout");
+      this.surface?.removeAttribute(marker);
+      this.surface = void 0;
+      this.root?.removeAttribute(backgroundMarker);
+      this.root = void 0;
+      for (const patch of this.patches) {
+        if (patch.extra) {
+          const index = patch.extra.parent.indexOf(patch.extra.route);
+          if (index >= 0) patch.extra.parent.splice(index, 1);
+        }
+        if (patch.route.type === patch.installedType && patch.route.props === patch.installed) {
+          patch.route.type = patch.type;
+          patch.route.props = patch.props;
+        }
+      }
+      this.patches = [];
     }
   };
 
@@ -3200,6 +3421,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.foregroundKeys = new Set(keys);
       this.tasks.setForeground([...this.foregroundKeys, ...[...this.active].filter((job) => this.foregroundKeys.has(job.key) && job.batch).map((job) => job.batch?.key ?? "")]);
     }
+    hasPendingVocabulary(key) {
+      return [...this.active].some((job) => job.key === key && !job.cancelled && !!job.onVocabulary);
+    }
     deprioritize(key) {
       for (const job of this.active) if (job.key === key) {
         job.priority = "prefetch";
@@ -3235,7 +3459,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           job.cleanup();
           this.active.delete(job);
           reject(new DOMException("已取消", "AbortError"));
-          if (job.batch?.jobs.every((item) => item.cancelled || item.delivered)) job.batch.controller.abort();
+          if (job.batch?.jobs.every((item) => item.cancelled || item.delivered && !item.onVocabulary)) job.batch.controller.abort();
         };
         signal.addEventListener("abort", abort, { once: true });
         this.active.add(job);
@@ -3273,11 +3497,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           batch.attempt++;
           const remaining = unique.filter((item) => jobs.some((job) => job.key === item.key && !job.cancelled && !job.delivered));
           if (!remaining.length) return;
-          const deliver = (index, text2, complete, finished = false) => {
+          const deliver = (index, text2, complete) => {
             const key = remaining[index]?.key;
             for (const job of jobs) if (job.key === key && !job.cancelled && !job.delivered) {
-              if (!complete || job.onVocabulary && !finished) job.partial(text2);
-              if (complete && (!job.onVocabulary || finished)) {
+              job.partial(text2);
+              if (complete) {
                 job.delivered = true;
                 job.resolve(text2);
               }
@@ -3287,8 +3511,12 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           const priority = jobs.some((job) => job.priority === "visible" || job.priority === "visible-batch") ? "visible-batch" : jobs[0]?.priority ?? "prefetch";
           const request = this.tasks.request({ key: batch.key, serviceKey: `ai:${normalizeAiBaseUrl(this.ai.baseUrl)}:${this.ai.model}`, priority, signal: batch.controller.signal, quota: this.ai, estimatedTokens: Math.ceil((characters + this.ai.prompt.length + 400) * 1.5) }, (signal) => translateAiBatch(remaining, this.ai, signal, deliver));
           this.setForeground(this.foregroundKeys);
-          const values = await request;
-          values.forEach((value, index) => deliver(index, value, true, true));
+          try {
+            const values = await request;
+            values.forEach((value, index) => deliver(index, value, true));
+          } catch (error) {
+            if (jobs.some((job) => !job.cancelled && !job.delivered)) throw error;
+          }
         }, batch.controller.signal).catch((error) => {
           for (const job of jobs) if (!job.cancelled && !job.delivered) job.reject(error);
         }).finally(() => {
@@ -3514,6 +3742,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       return this.vocabulary.watch(source, callback);
     }
     aiInflight = /* @__PURE__ */ new Map();
+    vocabularyInflight = /* @__PURE__ */ new Map();
     foregroundOwner;
     setForeground(owner) {
       this.foregroundOwner = owner;
@@ -3552,6 +3781,21 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       return [...new Set(states)].join("；") || "准备翻译";
     }
     async section(text2, owner, priority, signal, onPartial, context) {
+      const metric = measureRequest("section", { provider: this.settings.provider, priority });
+      let success = false;
+      try {
+        const value = await this.translateSection(text2, owner, priority, signal, (partial) => {
+          if (partial.trim()) metric.content();
+          onPartial?.(partial);
+        }, context);
+        if (value.trim()) metric.content();
+        success = true;
+        return value;
+      } finally {
+        metric.finish(success);
+      }
+    }
+    async translateSection(text2, owner, priority, signal, onPartial, context) {
       const values = [];
       for (const source of this.worker.preprocess(text2, this.settings.provider === "ai")) {
         signal.throwIfAborted();
@@ -3572,8 +3816,13 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         }
         signal.throwIfAborted();
         const cached = this.cache.get(key);
-        if (cached !== void 0 && (!combinedSource || this.vocabulary.has(combinedSource, key))) {
-          values.push(this.worker.format(source, cached));
+        if (cached !== void 0) {
+          const formatted = this.worker.format(source, cached);
+          onPartial?.(values.join("") + formatted);
+          if (combinedSource && !this.vocabulary.has(combinedSource, key) && !this.worker.batcher.hasPendingVocabulary(key)) {
+            this.refillVocabulary(key, source, combinedSource, formatted);
+          }
+          values.push(formatted);
           continue;
         }
         let keys = this.pendingKeys.get(owner);
@@ -3605,6 +3854,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
                 this.priorities.get(owner) ?? priority,
                 controller.signal,
                 (partial) => {
+                  const active = this.aiInflight.get(key);
+                  if (active?.controller === controller) active.partial = partial;
                   for (const callback of this.partialListeners.get(key) ?? []) callback(partial);
                 }
               ).then((value) => {
@@ -3617,7 +3868,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
               });
               inflight = { controller, promise };
               this.aiInflight.set(key, inflight);
-            } else if (priority === "visible" || priority === "interactive") this.worker.batcher.promote(key, priority);
+            } else {
+              if (priority === "visible" || priority === "interactive") this.worker.batcher.promote(key, priority);
+              if (inflight.partial !== void 0) listener(inflight.partial);
+            }
             const translated = await new Promise((resolve, reject) => {
               const abort = () => reject(new DOMException("已取消", "AbortError"));
               signal.addEventListener("abort", abort, { once: true });
@@ -3628,29 +3882,35 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             values.push(translated);
             continue;
           }
-          values.push(await withTranslationRetry(() => this.tasks.request({
-            key,
-            serviceKey,
-            priority: this.priorities.get(owner) ?? priority,
-            signal,
-            quota: { requestsPerMinute: 60, tokensPerMinute: 0 },
-            estimatedTokens: Math.ceil((source.length + (context?.before.length ?? 0) + (context?.after.length ?? 0) + 400) * 1.5)
-          }, async (requestSignal) => {
-            const metric = measureRequest(this.settings.provider);
-            let success = false;
-            try {
-              const translated = await translate(source, this.settings, requestSignal, (partial) => {
-                metric.content();
-                for (const callback of this.partialListeners.get(key) ?? []) callback(partial);
-              }, context);
-              requestSignal.throwIfAborted();
-              this.cache.set(key, translated);
-              success = true;
-              return translated;
-            } finally {
-              metric.finish(success);
-            }
-          }), signal));
+          values.push(await withTranslationRetry(async () => {
+            const reused = this.cache.get(key);
+            if (reused !== void 0) return this.worker.format(source, reused);
+            return this.tasks.request({
+              key,
+              serviceKey,
+              priority: this.priorities.get(owner) ?? priority,
+              signal,
+              quota: { requestsPerMinute: 60, tokensPerMinute: 0 },
+              estimatedTokens: Math.ceil((source.length + (context?.before.length ?? 0) + (context?.after.length ?? 0) + 400) * 1.5)
+            }, async (requestSignal) => {
+              const reused2 = this.cache.get(key);
+              if (reused2 !== void 0) return this.worker.format(source, reused2);
+              const metric = measureRequest(this.settings.provider);
+              let success = false;
+              try {
+                const translated = await translate(source, this.settings, requestSignal, (partial) => {
+                  metric.content();
+                  for (const callback of this.partialListeners.get(key) ?? []) callback(partial);
+                }, context);
+                requestSignal.throwIfAborted();
+                this.cache.set(key, translated);
+                success = true;
+                return translated;
+              } finally {
+                metric.finish(success);
+              }
+            });
+          }, signal));
         } finally {
           keys.delete(key);
           listeners.delete(listener);
@@ -3659,9 +3919,23 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       }
       return this.worker.format(text2, values.join(""));
     }
+    refillVocabulary(key, source, post, translation) {
+      if (this.vocabularyInflight.has(key)) return;
+      const controller = new AbortController();
+      const publish = (words2, complete) => {
+        if (!controller.signal.aborted) this.vocabulary.publish(post, key, words2, complete);
+      };
+      const promise = collectVocabulary(source, this.settings, this.tasks, controller.signal, translation, (words2) => publish(words2, false)).then((words2) => publish(words2, true)).catch(() => {
+      }).finally(() => {
+        if (this.vocabularyInflight.get(key)?.controller === controller) this.vocabularyInflight.delete(key);
+      });
+      this.vocabularyInflight.set(key, { controller, promise });
+    }
     destroy() {
       for (const entry of this.aiInflight.values()) entry.controller.abort();
       this.aiInflight.clear();
+      for (const entry of this.vocabularyInflight.values()) entry.controller.abort();
+      this.vocabularyInflight.clear();
       this.worker.destroy();
       this.partialListeners.clear();
       this.vocabulary.clearListeners();
@@ -3732,7 +4006,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         subtree: true,
         characterData: true,
         attributes: true,
-        attributeFilter: ["hidden", "collapsed", "aria-hidden", "aria-expanded", "open", "class", "style", "slot", "id", "thingid", "post-id", "lang"]
+        attributeFilter: ["hidden", "collapsed", "aria-hidden", "aria-expanded", "open", "class", "style", "slot", "id", "thingid", "post-id", "lang", "data-testid"]
       });
       document.addEventListener("visibilitychange", this.onVisibility);
       document.addEventListener("click", this.onCommentExpansion, true);
@@ -3786,7 +4060,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       }, 16);
     }
     updateForeground() {
-      const first = [...this.entries.values()].filter((entry) => entry.visible && entry.element.isConnected).sort((a2, b) => a2.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top)[0];
+      const first = [...this.entries.values()].filter((entry) => entry.visible && (entry.state === "idle" || entry.state === "loading") && !isXPostBackground(entry.element) && isReadable(entry.element)).sort((a2, b) => a2.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top)[0];
       this.service.setForeground(first?.owner);
     }
     remove(entry) {
@@ -3836,6 +4110,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       for (const root of this.roots) {
         if (root instanceof Element && !root.isConnected) continue;
         for (const candidate of discover(root)) {
+          if (isXPostBackground(candidate.element)) continue;
           const { kind } = candidate;
           if (!this.settings[kind]) continue;
           const element = this.longPosts.prepare(candidate.element);
@@ -3970,13 +4245,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       }
       if (entry.kind !== "title") matchTextStyle(box, entry.element);
       box.dataset.translationTheme = this.settings.translationTheme;
+      box.dataset.ftFont = entry.kind === "title" || entry.element.matches("h1,h2,h3,h4,h5,h6") ? "title" : "body";
       box.lang = "zh-CN";
       box.setAttribute("aria-label", "中文翻译");
       const anchor = entry.element.closest("a");
       const insertionAnchor = anchor ?? entry.element;
       const slot = insertionAnchor.getAttribute("slot");
       if (slot !== null) box.setAttribute("slot", slot);
-      insertionAnchor.after(box);
+      if (!anchor && entry.element.matches("li,td,th")) entry.element.append(box);
+      else insertionAnchor.after(box);
       entry.box?.remove();
       entry.box = box;
       for (const item of entry.inlineBoxes) item.remove();
@@ -3997,6 +4274,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           part.setAttribute("aria-label", "本段中文翻译");
           matchTextStyle(part, placement.anchor ?? entry.element);
           part.dataset.translationTheme = this.settings.translationTheme;
+          part.dataset.ftFont = placement.anchor?.matches("h1,h2,h3,h4,h5,h6") || box.dataset.ftFont === "title" ? "title" : "body";
           if (placement.range) {
             const insertion = placement.range.cloneRange();
             insertion.collapse(false);
@@ -4014,7 +4292,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         }
         for (const separator of x?.separators ?? []) entry.originals.hideRange(separator);
       }
-      const current = () => !controller.signal.aborted && !this.destroyed && this.route === location.href && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity && sourceSnapshot(entry.element).innerHTML === entry.signature;
+      const current = () => !controller.signal.aborted && !this.destroyed && (this.route === location.href || isXPostBackground(entry.element) || isXPostBackgroundRoute(entry.element)) && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity && sourceSnapshot(entry.element).innerHTML === entry.signature;
       const running = /* @__PURE__ */ new Set();
       let statusTimer;
       let startedAt = Date.now();
@@ -4077,13 +4355,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
               target.append(retry);
             } else if (value === void 0 && !pending.has(plan.index)) target.replaceChildren();
           }
-          updateXLongPostFold(entry.element);
           return;
         }
         if (this.translationOnly && pending.size === 0 && failed.size === 0) entry.originals.hide(entry.element);
         const fragment = renderTranslationSections(snapshot, translations, { pending, failed, streaming });
         if (fragment) box.replaceChildren(fragment);
-        updateXLongPostFold(entry.element);
         if (failed.size) {
           const reason = document.createElement("span");
           reason.className = "hnr-translation-failure";
@@ -4168,6 +4444,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             entry.controller = null;
             entry.state = failed.size ? "error" : "done";
             this.service.release(entry.owner);
+            this.updateForeground();
+          } else if (!running.size && !controller.signal.aborted && entry.controller === controller) {
+            this.cancel(entry);
+            this.roots.add(entry.element);
+            this.schedule();
           }
         }
       };
@@ -4207,6 +4488,314 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     }
   };
 
+  // src/font-settings.ts
+  var CHINESE_FONT_LABELS = Object.freeze({
+    "alibaba puhuiti": "阿里巴巴普惠体",
+    dengxian: "等线",
+    fangsong: "仿宋",
+    "harmonyos sans sc": "鸿蒙黑体",
+    "heiti sc": "黑体-简",
+    "heiti tc": "黑体-繁",
+    "hiragino sans gb": "冬青黑体简体中文",
+    kaiti: "楷体",
+    "kaiti sc": "楷体-简",
+    "kaiti tc": "楷体-繁",
+    "lxgw wenkai": "霞鹜文楷",
+    "microsoft jhenghei": "微软正黑体",
+    "microsoft jhenghei ui": "微软正黑体 UI",
+    "microsoft yahei": "微软雅黑",
+    "microsoft yahei ui": "微软雅黑 UI",
+    "noto sans cjk sc": "思源黑体",
+    "noto sans cjk tc": "思源黑体繁体",
+    "noto serif cjk sc": "思源宋体",
+    "noto serif cjk tc": "思源宋体繁体",
+    nsimsun: "新宋体",
+    "pingfang hk": "苹方-港",
+    "pingfang sc": "苹方-简",
+    "pingfang tc": "苹方-繁",
+    simfang: "仿宋",
+    simhei: "黑体",
+    simkai: "楷体",
+    simsun: "宋体",
+    "smiley sans": "得意黑",
+    "songti sc": "宋体-简",
+    "songti tc": "宋体-繁",
+    "source han sans sc": "思源黑体",
+    "source han sans tc": "思源黑体繁体",
+    "source han serif sc": "思源宋体",
+    "source han serif tc": "思源宋体繁体",
+    stfangsong: "华文仿宋",
+    stheiti: "华文黑体",
+    stkaiti: "华文楷体",
+    stsong: "华文宋体",
+    "wenquanyi micro hei": "文泉驿微米黑",
+    "wenquanyi zen hei": "文泉驿正黑"
+  });
+  function localFontOptions(families) {
+    const unique = /* @__PURE__ */ new Map();
+    for (const value of families) {
+      const family = value.replace(/\s+/gu, " ").trim();
+      if (family && family.length <= 200 && !unique.has(family.toLocaleLowerCase("en-US"))) unique.set(family.toLocaleLowerCase("en-US"), family);
+    }
+    return [...unique.values()].map((family) => {
+      const chinese = CHINESE_FONT_LABELS[family.toLocaleLowerCase("en-US")];
+      const label = chinese ? `${chinese}（${family}）` : family;
+      return { family, label, searchText: `${label} ${family}`.normalize("NFKC").toLowerCase() };
+    }).sort((a2, b) => Number(new RegExp("\\p{Script=Han}", "u").test(b.label)) - Number(new RegExp("\\p{Script=Han}", "u").test(a2.label)) || a2.label.localeCompare(b.label, "zh-CN"));
+  }
+  function createLocalFontQuery(doc) {
+    const browser = doc.defaultView;
+    let native;
+    try {
+      native = browser?.queryLocalFonts;
+    } catch {
+      return;
+    }
+    if (!browser || typeof native !== "function") return;
+    let cached;
+    let pending;
+    return async () => {
+      if (cached) return cached;
+      if (pending) return pending;
+      pending = Promise.resolve(Reflect.apply(native, browser, [])).then((entries) => entries.map((entry) => entry.family ?? ""));
+      try {
+        cached = await pending;
+        return cached;
+      } finally {
+        pending = void 0;
+      }
+    };
+  }
+  var PRESETS = [
+    { family: "", label: "跟随网站", searchText: "默认 跟随网站 default" },
+    { family: "system-ui", label: "系统字体", searchText: "系统 system-ui" },
+    { family: "sans-serif", label: "无衬线字体", searchText: "无衬线 sans-serif" },
+    { family: "serif", label: "衬线字体", searchText: "衬线 serif" },
+    ...localFontOptions(["Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Noto Serif CJK SC", "LXGW WenKai"])
+  ];
+  function mountFontSettings(section, current, query) {
+    let alive = true;
+    let attempted = false;
+    let loading = false;
+    let local = [];
+    let scope = "title";
+    const drafts = { title: { family: current.title.family, size: current.title.size ? String(current.title.size) : "", search: "", scroll: 0, valid: true, badInput: false }, body: { family: current.body.family, size: current.body.size ? String(current.body.size) : "", search: "", scroll: 0, valid: true, badInput: false } };
+    const tabs = /* @__PURE__ */ new Map();
+    const hint = document.createElement("p");
+    hint.className = "font-hint";
+    hint.textContent = "原文与译文同步生效。留空跟随网站，代码保留等宽字体。";
+    const load = document.createElement("button");
+    load.type = "button";
+    load.textContent = "重试读取";
+    load.hidden = true;
+    load.disabled = !query;
+    const status = document.createElement("p");
+    status.setAttribute("role", "status");
+    status.textContent = query ? "进入字体页后自动读取本机字体。" : "当前浏览器不支持读取字体列表，可使用预设或手动填写字体名。";
+    const catalog = document.createElement("div");
+    catalog.className = "font-catalog";
+    catalog.append(status, load);
+    section.append(hint, catalog);
+    const tablist = document.createElement("div");
+    tablist.className = "font-scope-tabs";
+    tablist.setAttribute("role", "tablist");
+    tablist.setAttribute("aria-label", "字体范围");
+    section.append(tablist);
+    const group = document.createElement("div");
+    group.className = "font-group";
+    group.id = "ft-font-editor";
+    group.setAttribute("role", "tabpanel");
+    section.append(group);
+    const title = "标题";
+    const familyLabel = document.createElement("label");
+    familyLabel.textContent = "字体名称";
+    const family = document.createElement("input");
+    family.name = `font-${scope}-family`;
+    family.type = "text";
+    family.maxLength = 200;
+    family.value = current[scope].family;
+    family.placeholder = "选择下方字体，或输入名称";
+    familyLabel.append(family);
+    const sizeLabel = document.createElement("label");
+    sizeLabel.textContent = "字号（px）";
+    const size = document.createElement("input");
+    size.name = `font-${scope}-size`;
+    size.type = "number";
+    size.min = "10";
+    size.max = "72";
+    size.step = "1";
+    size.placeholder = "跟随网站";
+    size.value = current[scope].size ? String(current[scope].size) : "";
+    sizeLabel.append(size);
+    const preview = document.createElement("div");
+    preview.className = "font-preview";
+    preview.textContent = "阅读与思考 · Read & explore 0123";
+    preview.lang = "zh-CN";
+    preview.setAttribute("aria-label", `${title}字体预览`);
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "搜索字体（中文或英文名称）";
+    search.setAttribute("aria-label", `搜索${title}字体`);
+    const list = document.createElement("div");
+    list.className = "font-options";
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", `${title}可用字体`);
+    const updatePreview = () => {
+      preview.style.fontFamily = fontFamilyCss(normalizeFonts({ [scope]: { family: family.value } })[scope].family);
+      preview.style.fontSize = `${size.value && size.checkValidity() ? Number(size.value) : 18}px`;
+      for (const button2 of list.querySelectorAll("button")) button2.setAttribute("aria-pressed", String(button2.dataset.family === family.value));
+    };
+    const renderList = () => {
+      list.replaceChildren();
+      const choices = new Map([...PRESETS, ...local].map((option) => [option.family.toLowerCase(), option]));
+      const term = search.value.normalize("NFKC").toLowerCase().trim();
+      const matches = [...choices.values()].filter((option) => option.searchText.includes(term));
+      for (const option of matches.slice(0, 120)) {
+        const button2 = document.createElement("button");
+        button2.type = "button";
+        button2.className = "font-option";
+        button2.dataset.family = option.family;
+        button2.title = option.label;
+        button2.setAttribute("aria-pressed", String(option.family === family.value));
+        const name = document.createElement("span");
+        name.className = "font-name";
+        name.textContent = option.label;
+        const sample = document.createElement("span");
+        sample.className = "font-sample";
+        sample.textContent = "中文预览 · Aa 0123";
+        sample.style.fontFamily = fontFamilyCss(option.family);
+        button2.append(name, sample);
+        button2.onclick = () => {
+          family.value = option.family;
+          updatePreview();
+        };
+        list.append(button2);
+      }
+      if (!matches.length || matches.length > 120) {
+        const note = document.createElement("p");
+        note.textContent = matches.length ? "输入名称继续缩小范围。" : "未找到匹配字体，也可在上方手动填写。";
+        list.append(note);
+      }
+    };
+    search.oninput = renderList;
+    family.oninput = updatePreview;
+    size.oninput = updatePreview;
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "font-reset";
+    reset.textContent = `恢复${title}默认`;
+    group.append(familyLabel, sizeLabel, preview, search, list, reset);
+    const stash = () => {
+      drafts[scope] = { family: family.value, size: size.value, search: search.value, scroll: list.scrollTop, valid: size.checkValidity(), badInput: size.validity.badInput || !!size.validationMessage && size.value === "" };
+    };
+    const sync = () => {
+      const draft = drafts[scope];
+      const label = scope === "title" ? "标题" : "正文";
+      family.name = `font-${scope}-family`;
+      size.name = `font-${scope}-size`;
+      family.value = draft.family;
+      size.value = draft.size;
+      search.value = draft.search;
+      size.setCustomValidity(draft.badInput ? "请输入有效字号，或清空以跟随网站。" : "");
+      preview.setAttribute("aria-label", `${label}字体预览`);
+      search.setAttribute("aria-label", `搜索${label}字体`);
+      list.setAttribute("aria-label", `${label}可用字体`);
+      reset.textContent = `恢复${label}默认`;
+      group.setAttribute("aria-labelledby", `ft-font-scope-${scope}`);
+      for (const [key, tab] of tabs) {
+        tab.setAttribute("aria-selected", String(key === scope));
+        tab.tabIndex = key === scope ? 0 : -1;
+      }
+      renderList();
+      updatePreview();
+      list.scrollTop = draft.scroll;
+    };
+    const select2 = (next) => {
+      stash();
+      scope = next;
+      sync();
+    };
+    for (const [key, label] of [["title", "标题"], ["body", "正文"]]) {
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.id = `ft-font-scope-${key}`;
+      tab.textContent = label;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-controls", group.id);
+      tab.onclick = () => select2(key);
+      tablist.append(tab);
+      tabs.set(key, tab);
+    }
+    tablist.onkeydown = (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? "title" : event.key === "End" ? "body" : scope === "title" ? "body" : "title";
+      select2(next);
+      tabs.get(next)?.focus();
+    };
+    size.oninput = () => {
+      size.setCustomValidity("");
+      updatePreview();
+    };
+    reset.onclick = () => {
+      family.value = "";
+      size.value = "";
+      size.setCustomValidity("");
+      search.value = "";
+      renderList();
+      updatePreview();
+      list.scrollTop = 0;
+    };
+    sync();
+    const loadFonts = async () => {
+      if (!query || loading || !alive) return;
+      loading = true;
+      load.hidden = true;
+      load.disabled = true;
+      status.textContent = "正在读取本机字体…";
+      try {
+        const families = await query();
+        if (!alive) return;
+        local = localFontOptions(families);
+        renderList();
+        status.textContent = `已读取 ${local.length} 种本机字体，可按中文或英文名称搜索。`;
+      } catch {
+        if (alive) {
+          status.textContent = "未能读取本机字体，仍可使用预设或手动填写。";
+          load.hidden = false;
+        }
+      } finally {
+        loading = false;
+        if (alive) load.disabled = false;
+      }
+    };
+    load.onclick = () => {
+      void loadFonts();
+    };
+    return {
+      activate: () => {
+        if (!attempted) {
+          attempted = true;
+          void loadFonts();
+        }
+      },
+      read: () => {
+        stash();
+        return normalizeFonts({ title: { family: drafts.title.family, size: Number(drafts.title.size) }, body: { family: drafts.body.family, size: Number(drafts.body.size) } });
+      },
+      valid: () => {
+        stash();
+        const invalid = ["title", "body"].find((key) => !drafts[key].valid);
+        if (!invalid) return true;
+        select2(invalid);
+        return false;
+      },
+      destroy: () => {
+        alive = false;
+      }
+    };
+  }
+
   // src/ui.ts
   function mountControls(read, save, clearCache, saveCredentials) {
     const host = document.createElement("div");
@@ -4239,9 +4828,16 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     fieldset{border:0;padding:0;margin:0;min-width:0}.pair{display:grid;grid-template-columns:1fr 1fr;gap:16px}
     p{font-size:12px;color:#707788;line-height:1.8}footer{padding:14px 24px;border-top:1px solid #ddd8cf;background:#ffffffb8;display:flex;align-items:center;justify-content:flex-end;gap:16px}
     [role=status]{margin:0;margin-right:auto;color:#4758d6}.actions{display:flex;gap:10px}.primary{background:#4758d6;color:white;border-color:#4758d6}.primary:hover{background:#3948b8}
+    .font-hint{margin:0 0 10px;font-size:12px}.font-catalog{display:flex;align-items:center;gap:12px;min-height:30px;margin-bottom:20px}.font-catalog [role=status]{font-size:12px;font-weight:400;color:#707788}.font-catalog button{flex:none;font-size:12px;padding:5px 10px}
+    .font-scope-tabs{display:flex;gap:4px;padding:4px;width:fit-content;background:#eeece6;border-radius:9px;margin:0 0 16px}.font-scope-tabs button{min-width:84px;padding:7px 20px;border:0;border-radius:6px;background:transparent;font-size:13px;color:#707788}.font-scope-tabs button[aria-selected=true]{background:#fff;color:#172033;box-shadow:0 1px 4px #17203312;font-weight:600}.font-group{border:1px solid #e3dfd6;border-radius:12px;padding:18px;background:#fff}.font-group label{font-size:12px;font-weight:500;margin:0 0 14px}.font-group input{font-weight:400}.font-group input[type=search]{margin:0 0 10px;font-size:12px}
+    .font-preview{height:104px;display:flex;align-items:safe center;padding:16px;margin:4px 0 16px;background:#f7f6f2;border:1px solid #eeebe5;border-radius:8px;overflow:auto;overflow-wrap:anywhere;line-height:1.6;color:#172033;font-weight:400}
+    .font-options{height:236px;overflow:auto;scrollbar-gutter:stable;margin:0 0 14px;display:grid;grid-auto-rows:64px;align-content:start;gap:5px}.font-option{text-align:left;display:flex;flex-direction:column;justify-content:center;gap:3px;padding:8px 11px;border:1px solid transparent;border-radius:7px;background:#faf9f6;min-width:0;line-height:1.4}.font-name{font-size:12px;font-weight:500;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.font-option:hover{background:#f0eee8}.font-option[aria-pressed=true]{border-color:#c4caf2;background:#eef0ff;box-shadow:inset 3px 0 #5966c7}.font-sample{font-size:15px;font-weight:400;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis;color:#424b5f}.font-reset{padding:5px 0;border:0;background:transparent;font-size:12px;color:#707788}.font-reset:hover{background:transparent;color:#4758d6}
+
     @media(max-width:680px){dialog{width:calc(100vw - 20px);height:94dvh;border-radius:16px}.layout{display:block;padding:16px}nav{position:static;display:flex;overflow:auto;border-left:0;border-bottom:1px solid #ddd8cf;margin-bottom:16px}nav button{flex:1;white-space:nowrap;min-height:44px;border-left:0;border-bottom:2px solid transparent;padding:8px}nav button[aria-selected=true]{border-bottom-color:#4758d6}nav small{display:none}.section{padding:16px}.pair{grid-template-columns:1fr;gap:0}footer{padding:12px 16px;flex-wrap:wrap}header{padding:12px 16px}}
   `;
     shadow.append(style);
+    const queryFonts = createLocalFontQuery(document);
+    let fontControls;
     let disposeWordbook;
     let modelRequest;
     let modelTimer;
@@ -4287,13 +4883,14 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const sections = /* @__PURE__ */ new Map();
       const tabs = /* @__PURE__ */ new Map();
       const activate = (id) => {
+        if (id === "fonts") fontControls?.activate();
         for (const [key, section] of sections) section.hidden = key !== id;
         for (const [key, tab] of tabs) {
           tab.setAttribute("aria-selected", String(key === id));
           tab.tabIndex = key === id ? 0 : -1;
         }
       };
-      for (const [id, name, description] of [["api", "接口", "地址、密钥与模型"], ["scope", "翻译范围", "内容与预加载"], ["words", "单词本", "列表管理与词典详情"], ["cache", "缓存与说明", "本地数据与隐私"]]) {
+      for (const [id, name, description] of [["api", "接口", "地址、密钥与模型"], ["scope", "翻译范围", "内容与预加载"], ["fonts", "字体", "标题、正文与预览"], ["words", "单词本", "列表管理与词典详情"], ["cache", "缓存与说明", "本地数据与隐私"]]) {
         const tab = document.createElement("button");
         tab.type = "button";
         tab.id = `ft-tab-${id}`;
@@ -4335,6 +4932,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const cache = sections.get("cache");
       if (!api || !scope || !cache) throw new Error("Missing settings sections");
       activate("api");
+      const fontSection = sections.get("fonts");
+      if (fontSection) fontControls = mountFontSettings(fontSection, current.fonts, queryFonts);
       let target = scope;
       const fields = /* @__PURE__ */ new Map();
       function input(name, text2, type, value) {
@@ -4496,9 +5095,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           const baseUrl = normalizeAiBaseUrl(base);
           saveCredentials?.(baseUrl, key);
           modelStatus.textContent = "地址与密钥已保存，正在获取模型…";
-          const data = await requestJson(`${baseUrl}/models`, controller.signal, void 0, key);
+          const data2 = await requestJson(`${baseUrl}/models`, controller.signal, void 0, key);
           if (controller.signal.aborted) return;
-          const items = data && typeof data === "object" && "data" in data ? data.data : void 0;
+          const items = data2 && typeof data2 === "object" && "data" in data2 ? data2.data : void 0;
           const ids = Array.isArray(items) ? [...new Set(items.flatMap((item) => item && typeof item === "object" && "id" in item && typeof item.id === "string" && item.id.trim() ? [item.id.trim()] : []))].sort() : [];
           if (!ids.length) throw new Error("Empty model list");
           const selected = model.value;
@@ -4575,6 +5174,12 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       panel.onsubmit = (event) => {
         event.preventDefault();
         const next = { ...current };
+        if (fontControls && !fontControls.valid()) {
+          activate("fonts");
+          fontSection?.querySelector("input:invalid")?.reportValidity();
+          return;
+        }
+        next.fonts = fontControls?.read() ?? current.fonts;
         next.translationTheme = theme.value;
         for (const name of ["xCollapseSidebar", "xHideFloatingIcons", "xHideRightSidebar", "xHideAds"]) {
           const field = fields.get(name);
@@ -4611,6 +5216,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     function setOpen(open) {
       disposeWordbook?.();
       disposeWordbook = void 0;
+      fontControls?.destroy();
+      fontControls = void 0;
       if (!open) stopWordSpeech(shadow);
       modelRequest?.abort();
       clearTimeout(modelTimer);
@@ -4643,6 +5250,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     });
     if (!host.matches(OWNED)) throw new Error("Missing UI ownership");
     return () => {
+      fontControls?.destroy();
       disposeWordbook?.();
       stopWordSpeech(shadow);
       modelRequest?.abort();
@@ -4662,8 +5270,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     return /\/status\/(\d+)/.exec(link2?.getAttribute("href") ?? "")?.[1];
   }
   var XPostViewport = class {
-    snapshot;
+    snapshots = [];
     timer;
+    focusTimer;
+    currentRoute = route();
+    returningRoute;
     constructor() {
       document.addEventListener("click", this.capture, true);
       window.addEventListener("wheel", this.cancel, { passive: true });
@@ -4678,20 +5289,59 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const article = target?.closest('article[data-testid="tweet"]');
       if (!article || target?.closest('[data-ft-owned],button,[role="button"],input,textarea,video')) return;
       const link2 = target?.closest("a");
-      if (link2 && !/^\/[^/]+\/status\/\d+\/?$/.test(link2.getAttribute("href") ?? "")) return;
+      if (link2 && !isXPostPath(link2.getAttribute("href") ?? "")) return;
       this.cancel();
       const anchor = postId(article);
       const rect = article.getBoundingClientRect();
       if (!anchor || rect.height <= 0 || rect.bottom <= 0 || rect.top >= innerHeight) return;
-      this.snapshot = { route: route(), width: innerWidth, anchor, top: rect.top };
+      const currentRoute = route();
+      const existing = this.snapshots.findIndex((snapshot) => snapshot.route === currentRoute);
+      if (existing >= 0) this.snapshots.splice(existing);
+      this.snapshots.push({ route: currentRoute, width: innerWidth, anchor, top: rect.top, container: article.closest("[data-ft-x-native-post]") });
+      if (this.snapshots.length > 20) this.snapshots.shift();
     };
+    reconcile() {
+      const currentRoute = route();
+      if (currentRoute === this.currentRoute) return;
+      this.currentRoute = currentRoute;
+      clearTimeout(this.focusTimer);
+      this.focusTimer = void 0;
+      const returning = this.returningRoute === currentRoute;
+      this.returningRoute = void 0;
+      if (returning || !isXPostPath(location.pathname)) return;
+      const id = /\/(\d+)\/?$/.exec(location.pathname)?.[1];
+      const deadline = Date.now() + 5e3;
+      const focus = (settled = false) => {
+        this.focusTimer = void 0;
+        if (route() !== currentRoute || Date.now() >= deadline) return;
+        const surface = document.querySelector("[data-ft-x-native-post]");
+        const primary = surface?.querySelector('[data-testid="primaryColumn"]');
+        const anchor = [...primary?.querySelectorAll('article[data-testid="tweet"]') ?? []].find((node2) => postId(node2) === id);
+        if (!surface || !primary || !anchor || surface.getBoundingClientRect().height <= 0 || anchor.getBoundingClientRect().height <= 0) {
+          this.focusTimer = setTimeout(() => focus(), 100);
+          return;
+        }
+        if (!settled) {
+          this.focusTimer = setTimeout(() => focus(true), 200);
+          return;
+        }
+        let top = surface.getBoundingClientRect().top;
+        for (let node2 = primary.querySelector('[data-testid="app-bar-back"]'); node2 && node2 !== primary; node2 = node2.parentElement) {
+          if (["sticky", "fixed"].includes(getComputedStyle(node2).position)) top = Math.max(top, node2.getBoundingClientRect().bottom);
+        }
+        const delta = anchor.getBoundingClientRect().top - (top + 12);
+        if (Math.abs(delta) > 1) surface.scrollTo({ top: Math.max(0, surface.scrollTop + delta), left: surface.scrollLeft, behavior: "instant" });
+      };
+      this.focusTimer = setTimeout(() => focus(), 0);
+    }
     restore() {
-      const snapshot = this.snapshot;
+      const snapshot = this.snapshots.at(-1);
       if (!snapshot || snapshot.route === route() || snapshot.width !== innerWidth) return;
       this.cancel();
-      this.snapshot = void 0;
+      this.snapshots.pop();
+      this.returningRoute = snapshot.route;
       const deadline = Date.now() + 2e3;
-      const findAnchor = () => [...document.querySelectorAll('[data-testid="primaryColumn"] article[data-testid="tweet"]')].find((node2) => postId(node2) === snapshot.anchor);
+      const findAnchor = () => [...(snapshot.container?.isConnected ? snapshot.container : document).querySelectorAll('[data-testid="primaryColumn"] article[data-testid="tweet"]')].find((node2) => postId(node2) === snapshot.anchor);
       const waitForFeed = () => {
         if (innerWidth !== snapshot.width || Date.now() >= deadline) {
           this.cancel();
@@ -4709,7 +5359,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           const rect = anchor.getBoundingClientRect();
           if (rect.height <= 0) return;
           const delta = rect.top - snapshot.top;
-          if (Math.abs(delta) > 1) window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: "instant" });
+          if (Math.abs(delta) > 1) {
+            const container = anchor.closest("[data-ft-x-native-post]");
+            if (container) container.scrollTo({ top: Math.max(0, container.scrollTop + delta), left: container.scrollLeft, behavior: "instant" });
+            else window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: "instant" });
+          }
         }, 200);
       };
       this.timer = setTimeout(waitForFeed, 0);
@@ -4717,13 +5371,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     cancel = () => {
       clearTimeout(this.timer);
       this.timer = void 0;
+      clearTimeout(this.focusTimer);
+      this.focusTimer = void 0;
     };
     onKey = (event) => {
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) this.cancel();
     };
     destroy() {
       this.cancel();
-      this.snapshot = void 0;
+      this.snapshots = [];
       document.removeEventListener("click", this.capture, true);
       window.removeEventListener("wheel", this.cancel);
       window.removeEventListener("touchstart", this.cancel);
@@ -4736,11 +5392,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
   // src/x-ads.ts
   function isXAd(article) {
     const candidates = article.querySelectorAll('[data-testid="promotedIndicator"],span');
-    for (const marker of candidates) {
-      if (marker.closest("article") !== article || marker.closest('[data-testid="tweetText"],[data-testid="User-Name"],[data-ft-owned],a,time')) continue;
-      if (marker.matches('[data-testid="promotedIndicator"]')) return true;
-      if (!/^(广告|廣告|推广|推廣|Ad|Promoted|Sponsored)$/i.test(marker.textContent?.trim() ?? "")) continue;
-      for (let header = marker.parentElement; header && header !== article; header = header.parentElement) {
+    for (const marker2 of candidates) {
+      if (marker2.closest("article") !== article || marker2.closest('[data-testid="tweetText"],[data-testid="User-Name"],[data-ft-owned],a,time')) continue;
+      if (marker2.matches('[data-testid="promotedIndicator"]')) return true;
+      if (!/^(广告|廣告|推广|推廣|Ad|Promoted|Sponsored)$/i.test(marker2.textContent?.trim() ?? "")) continue;
+      for (let header = marker2.parentElement; header && header !== article; header = header.parentElement) {
         if (header.querySelector('[data-testid="tweetText"]')) break;
         if (header.querySelector('[data-testid="User-Name"]') && header.querySelector('[data-testid="caret"]')) return true;
       }
@@ -4814,7 +5470,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         }
       }
       const selector = this.kind === "video" ? '[data-testid="videoPlayer"],video' : '[data-testid="tweetPhoto"],img[src*="pbs.twimg.com/media/"],img[data-testid="card_img"],[data-testid="card.layoutLarge.media"] img';
-      const containsPost = (node2) => [...node2.querySelectorAll('[data-testid="tweetText"],[data-testid="User-Name"],[data-testid^="UserAvatar"],time,[role="group"]')].some((item) => !item.closest('[data-testid="videoPlayer"],[data-testid="videoComponent"],[data-ft-owned]'));
+      const articleContent = '[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"],[data-block="true"]';
+      const containsPost = (node2) => node2.matches(articleContent) || [...node2.querySelectorAll(`[data-testid="tweetText"],[data-testid="User-Name"],[data-testid^="UserAvatar"],time,[role="group"],${articleContent}`)].some((item) => !item.closest('[data-testid="videoPlayer"],[data-testid="videoComponent"],[data-ft-owned]'));
       const desired = new Set(mediaRoots);
       for (const player of mediaRoots ? [] : document.querySelectorAll(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
         if (this.kind === "image" && player.closest('[data-ft-video-resizable],[data-testid="videoComponent"],[data-testid="videoPlayer"]')) continue;
@@ -4989,6 +5646,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.update(settings);
     }
     viewport;
+    posts = new XPostModal();
     observer;
     timer;
     hidden = /* @__PURE__ */ new Set();
@@ -5012,8 +5670,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.scan();
     }
     scan() {
+      this.posts.reconcile();
       this.videos?.reconcile();
       this.images?.reconcile();
+      this.viewport?.reconcile();
       const nav = document.querySelector('header[role="banner"] nav');
       const rail = nav?.parentElement;
       if (rail && nav && this.toggle && this.brand) {
@@ -5068,10 +5728,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.hidden.clear();
     }
     exitPost = (event) => {
-      if (event.key !== "Escape" || event.repeat || event.defaultPrevented || event.isComposing || !/^\/[^/]+\/status\/\d+\/?$/.test(location.pathname ?? "") || document.fullscreenElement) return;
-      if (event.composedPath().some((node2) => node2 instanceof HTMLElement && (node2.isContentEditable || node2.matches('input,textarea,select,[contenteditable="true"],dialog,[role="dialog"],[role="menu"]')))) return;
-      if (document.querySelector('[role="dialog"],[role="menu"],[data-ft-owned="word-popup"],:popover-open')) return;
-      const back = document.querySelector('[data-testid="primaryColumn"] [data-testid="app-bar-back"]');
+      if (event.key !== "Escape" || event.repeat || event.defaultPrevented || event.isComposing || !isXPostPath(location.pathname ?? "") || document.fullscreenElement) return;
+      const post = document.querySelector("[data-ft-x-native-post]");
+      if (event.composedPath().some((node2) => node2 instanceof HTMLElement && (node2.isContentEditable || node2.matches('input,textarea,select,[contenteditable="true"],[role="menu"]') || node2.matches('dialog,[role="dialog"]') && node2 !== post && !node2.contains(post)))) return;
+      if ([...document.querySelectorAll('[role="dialog"],dialog[open]')].some((node2) => node2 !== post && !node2.contains(post)) || document.querySelector('[role="menu"],[data-ft-owned="word-popup"],:popover-open')) return;
+      const back = (post ?? document).querySelector('[data-testid="primaryColumn"] [data-testid="app-bar-back"]');
       if (!back) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -5079,6 +5740,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       back.click();
     };
     destroy() {
+      this.posts.destroy();
       this.viewport?.destroy();
       this.videos?.destroy();
       this.images?.destroy();
@@ -5300,15 +5962,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
   };
 
   // src/reddit-ads.ts
-  var adContainerSelector = "shreddit-ad-post,shreddit-comments-page-ad";
+  var adContainerSelector = "shreddit-ad-post,shreddit-comments-page-ad,shreddit-sidebar-ad,shreddit-display-ad,#right-rail-ad-slot";
   var postSelector = `${adContainerSelector},shreddit-post,[data-testid="post-container"],.thing.link`;
   var promotionAttributes = ["promoted", "is-promoted", "is-sponsored", "data-promoted"];
   function isRedditAd(post) {
     if (post.matches(`${adContainerSelector},.thing.link.promoted`)) return true;
     if (promotionAttributes.some((name) => post.hasAttribute(name) && !/^(false|0)$/i.test(post.getAttribute(name)?.trim() ?? ""))) return true;
-    for (const marker of post.querySelectorAll('[slot="credit-bar"] :is(span,a),[data-testid="promoted-label"],.promoted-tag')) {
-      if (marker.closest(postSelector) !== post || marker.closest("[data-ft-owned]")) continue;
-      if (marker.matches('[data-testid="promoted-label"],.promoted-tag') || /^(Ad|Promoted|Sponsored|广告|廣告|推广|推廣|赞助|贊助)$/i.test(marker.textContent?.trim() ?? "")) return true;
+    for (const marker2 of post.querySelectorAll('[slot="credit-bar"] :is(span,a),[data-testid="promoted-label"],.promoted-tag')) {
+      if (marker2.closest(postSelector) !== post || marker2.closest("[data-ft-owned]")) continue;
+      if (marker2.matches('[data-testid="promoted-label"],.promoted-tag') || /^(Ad|Promoted|Sponsored|广告|廣告|推广|推廣|赞助|贊助)$/i.test(marker2.textContent?.trim() ?? "")) return true;
     }
     return false;
   }
@@ -5329,7 +5991,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         subtree: true,
         characterData: true,
         attributes: true,
-        attributeFilter: [...promotionAttributes, "class", "slot", "data-testid"]
+        attributeFilter: [...promotionAttributes, "class", "slot", "data-testid", "id"]
       });
       this.reconcile();
     }
@@ -5404,6 +6066,8 @@ article[data-testid="tweet"]{background-color:transparent!important}
 article[data-testid="tweet"] [data-testid="tweetText"],
 article[data-testid="tweet"] [data-testid="tweetText"] [data-ft-owned="translation"],
 article[data-testid="tweet"] [data-testid="tweetText"] + [data-ft-owned="translation"]{font-size:15px!important;line-height:20px!important}
+/* Desktop rails must not reserve space or force a hidden banner onto phones. */
+@media(min-width:701px){
 [data-ft-x-sidebar-collapsed] header[role="banner"]{display:flex!important;position:fixed!important;inset:0 auto 0 0;width:72px!important;z-index:100;align-items:center!important;background:Canvas}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden]{--ft-x-content-edge:15vw}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] header[role="banner"]{left:max(0px,calc(15vw - 120px))!important}
@@ -5421,13 +6085,24 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-x-sidebar-collapsed] header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:'';inset:50% auto auto 50%;width:20px;height:20px;transform:translate(-50%,-50%);background:linear-gradient(currentColor,currentColor) center/2px 18px no-repeat,linear-gradient(currentColor,currentColor) center/18px 2px no-repeat}
 [data-ft-x-sidebar-collapsed] header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"]{width:56px!important;padding:8px!important}
 [data-ft-x-sidebar-collapsed] header[role="banner"] [data-testid="SideNav_AccountSwitcher_Button"] > div:not(:has(img)){display:none!important}
+}
 [data-ft-x-right-hidden] [data-testid="sidebarColumn"]{display:none!important}
+@media(min-width:701px){
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]){--ft-x-nav-width:clamp(240px,24vw,320px);--ft-x-content-edge:var(--ft-x-nav-width)}
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]) header[role="banner"]{width:var(--ft-x-nav-width)!important;flex:0 0 var(--ft-x-nav-width)!important}
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]) main[role="main"]{min-width:0!important}
 [data-ft-x-right-hidden]:not([data-ft-x-sidebar-collapsed]) main[role="main"] > div{width:calc(100vw - 2 * var(--ft-x-nav-width))!important;max-width:calc(100vw - 2 * var(--ft-x-nav-width))!important;min-width:0!important}
+}
 [data-ft-x-right-hidden] main[role="main"] :is(div:has(> [data-testid="primaryColumn"]),[data-testid="primaryColumn"]){width:100%!important;max-width:none!important;min-width:0!important;flex-basis:auto!important}
 [data-ft-x-right-hidden] [data-testid="primaryColumn"] div:has(> section [data-testid="cellInnerDiv"]){width:100%!important;max-width:none!important}
+/* Article has additional narrow wrappers inside the already expanded column. */
+[data-ft-x-right-hidden] [data-testid="primaryColumn"] :is([data-testid="twitterArticleReadView"],[data-testid="twitterArticleTitle"],[data-testid="twitter-article-title"],[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"],div:has([data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"])){box-sizing:border-box;width:100%!important;max-width:none!important;min-width:0!important}
+/* The expanded Article reader sits outside primaryColumn. */
+@media(min-width:701px){
+[data-ft-x-right-hidden] div:has(> div > article[data-testid="twitterArticleReadView"]):not([data-testid="primaryColumn"] *){width:70vw!important;max-width:calc(100vw - 32px)!important;margin-inline:auto}
+}
+[data-ft-x-right-hidden] div:has(> div > article[data-testid="twitterArticleReadView"]):not([data-testid="primaryColumn"] *) > div{width:100%!important;max-width:none!important}
+:is([data-testid="twitterArticleTitle"],[data-testid="twitter-article-title"]) + [data-ft-owned="translation"]{align-self:stretch;width:100%}
 /* Keep inline videos compact when the reading column is widened. */
 [data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){position:relative!important;width:min(100%,var(--ft-media-fit-width,var(--ft-x-video-width,420px)))!important;max-width:var(--ft-x-video-width,420px)!important;min-width:0!important}
 [data-ft-image-resizable]{position:relative!important;width:100%!important;max-width:var(--ft-x-image-width,420px)!important;min-width:0!important}
@@ -5469,16 +6144,20 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-owned="video-resize"] button:focus-visible{outline:2px solid #1d9bf0;outline-offset:-2px}
 :fullscreen [data-ft-owned="video-resize"],[data-ft-video-resizable]:has(:fullscreen) > [data-ft-owned="video-resize"]{display:none}
 [data-ft-x-hide-icons] :is([data-testid="GrokDrawer"],[data-testid="chat-drawer-root"]){display:none!important}
+@media(min-width:701px){
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"]{align-items:center!important;width:100%;min-width:0}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"] > div{width:70vw!important;max-width:70vw!important;min-width:0!important;margin-inline:auto!important}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"] :is(div:has(> [data-testid="primaryColumn"]),[data-testid="primaryColumn"]){width:100%!important;max-width:none!important;min-width:0!important;flex-basis:auto!important}
+}
 [data-ft-x-hidden-icon]{display:none!important}
 [data-ft-x-ad]{display:none!important}
 [data-ft-reddit-ad]{display:none!important}
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] [data-testid="primaryColumn"] div:has(> section [data-testid="cellInnerDiv"]){width:100%!important;max-width:none!important}
 /* Never hide a shared heading or navigation container. */
+@media(min-width:701px){
 a[data-ft-x-native-logo]:not(:has(nav)):not(:has([data-ft-owned="x-sidebar-toggle"])){display:none!important}
 header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has([data-ft-owned="x-sidebar-toggle"])){display:none!important}
+}
 [data-ft-owned="x-sidebar-brand"]{display:flex!important;align-items:center;justify-content:center;flex:0 0 52px;width:52px;height:52px;box-sizing:border-box;margin:2px 0;color:inherit}
 [data-ft-x-sidebar-collapsed] [data-ft-owned="x-sidebar-brand"]{align-self:center!important;margin-inline:auto!important}
 [data-ft-owned="x-sidebar-toggle"]{display:grid!important;place-items:center;width:52px;height:52px;box-sizing:border-box;margin:0;padding:10px;border:0;border-radius:50%;background:transparent;color:inherit;cursor:pointer}
@@ -5506,19 +6185,47 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
 [data-ft-x-search-surface] form{width:100%!important;max-width:none!important;min-width:0!important;margin:0!important}
 [data-ft-x-search-surface] [role="listbox"]{max-height:60dvh!important;overflow-y:auto!important;overscroll-behavior:contain}
 
-/* Full X post text is translated even while its bilingual view is clipped. */
+/* Keep the preview's final sentence and translation whole; defer the remainder. */
 [data-ft-long-source],[data-ft-long-more]{display:none!important}
-[data-ft-long-post] .ft-long-post-viewport{max-height:var(--ft-long-post-height,320px);overflow:hidden;overflow-anchor:none}
-[data-ft-long-post][data-expanded] .ft-long-post-viewport{max-height:none}
+[data-ft-long-post] .ft-long-post-viewport{overflow-anchor:none}
+[data-ft-long-post] [data-testid="tweetText"]{white-space:pre-wrap}
+[data-ft-long-remainder][hidden]{display:none!important}
 [data-ft-owned="long-post-toggle"]{display:block;border:0;background:none;color:#1d9bf0;padding:6px 0;cursor:pointer;font:inherit;text-align:start}
 
 [data-ft-owned="long-post-ellipsis"]{color:#536471;line-height:20px}
 [data-ft-long-post][data-expanded] > [data-ft-owned="long-post-ellipsis"]{display:none}
 
 [data-ft-owned="long-post-toggle"][hidden]{display:none}
+
+/* Prepare Post skeleton and content geometry before the first paint. The runtime
+   marker only identifies the scroll target; it must not change the layout. */
+[data-ft-x-post-layout] [role="dialog"]:has([data-testid="primaryColumn"]):not(:has([role="dialog"] [data-testid="primaryColumn"])){overflow-y:auto!important;overscroll-behavior:contain;scrollbar-gutter:stable}
+[data-ft-x-post-layout] [role="dialog"] [data-testid="primaryColumn"]{box-sizing:border-box;width:100%!important;max-width:none!important;min-width:0!important;flex:1 1 auto!important;padding-inline:var(--ft-x-content-edge,15vw)!important}
+@media(max-width:700px){
+/* Fill the available mobile column in either sidebar setting. Native tablet
+   navigation can keep its own width; no viewport-based rail margin is added. */
+[data-ft-x-right-hidden]{--ft-x-content-edge:8px}
+[data-ft-x-right-hidden] main[role="main"]{flex:1 1 0%!important;min-width:0!important;align-items:stretch!important}
+[data-ft-x-right-hidden] main[role="main"] > div{box-sizing:border-box;width:100%!important;max-width:100%!important;min-width:0!important;margin-inline:0!important}
+[data-ft-x-right-hidden] div:has(> div > article[data-testid="twitterArticleReadView"]):not([data-testid="primaryColumn"] *){box-sizing:border-box;width:100%!important;max-width:100%!important;min-width:0!important;margin-inline:0!important}
+[data-ft-owned="x-sidebar-brand"]{display:none!important}
+[data-ft-x-post-layout] [role="dialog"] [data-testid="primaryColumn"]{padding-inline:8px!important}
+/* Shrink both the avatar and its reserved column so text can move left. Keep
+   the column height untouched for native conversation connector lines. */
+article[data-testid="tweet"] div:has(> [data-testid="Tweet-User-Avatar"]){width:28px!important;min-width:28px!important;max-width:28px!important;flex:0 0 28px!important;margin-inline-end:6px!important}
+article[data-testid="tweet"] [data-testid="Tweet-User-Avatar"]{width:28px!important;height:28px!important;min-width:28px!important;max-width:28px!important;flex:0 0 auto!important}
+/* X sets 40px inline on this deeper container, below the outer avatar slot. */
+article[data-testid="tweet"] [data-testid="Tweet-User-Avatar"] [data-testid^="UserAvatar-Container-"]{width:28px!important;height:28px!important;min-width:0!important;max-width:100%!important}
+/* Keep counts and share controls together without the desktop wrapping gap. */
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])){justify-content:space-between!important;gap:0!important;flex-wrap:nowrap!important;min-width:0!important}
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])) > div{flex:0 1 auto!important;min-width:0!important}
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])) :is(button,[role="button"],a){min-width:0!important;min-height:36px}
+[data-ft-x-right-hidden] article[data-testid="tweet"] [role="group"]:has([data-testid="reply"]):has(:is([data-testid="like"],[data-testid="unlike"])) span{font-size:12px!important;white-space:nowrap}
+}
 `;
     document.head.append(style);
     let settings = loadSettings();
+    const fonts = mountFontStyles(settings.fonts);
     const layout = new XLayout(settings, (collapsed) => {
       settings = { ...settings, xCollapseSidebar: collapsed };
       saveSettings(settings);
@@ -5534,11 +6241,12 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
       if (settings.enabled) runtime = new RedditRuntime(settings, new TranslationService(settings, cache));
     };
     const removeControls = mountControls(() => ({ ...settings, translationOnly: loadTranslationOnly() }), (next) => {
-      const styleOnly = JSON.stringify({ ...settings, translationTheme: next.translationTheme, xCollapseSidebar: next.xCollapseSidebar, xHideFloatingIcons: next.xHideFloatingIcons, xHideRightSidebar: next.xHideRightSidebar, xHideAds: next.xHideAds }) === JSON.stringify(next);
+      const styleOnly = JSON.stringify({ ...settings, fonts: next.fonts, translationTheme: next.translationTheme, xCollapseSidebar: next.xCollapseSidebar, xHideFloatingIcons: next.xHideFloatingIcons, xHideRightSidebar: next.xHideRightSidebar, xHideAds: next.xHideAds }) === JSON.stringify(next);
       settings = next;
       saveTranslationOnly(next.translationOnly);
       saveSettings(next);
       layout.update(next);
+      fonts.update(next.fonts);
       if (styleOnly && runtime) runtime.setTranslationTheme(next.translationTheme);
       else restart();
     }, () => cache.clear(), (baseUrl, apiKey) => {
@@ -5558,6 +6266,7 @@ header[role="banner"] h1:has(> a[data-ft-x-native-logo]):not(:has(nav)):not(:has
         redditMedia.destroy();
         redditAds.destroy();
         removeControls();
+        fonts.destroy();
         style.remove();
       }
     });

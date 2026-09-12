@@ -45,7 +45,8 @@ export class XVideoResize {
       }
     }
     const selector = this.kind === 'video' ? '[data-testid="videoPlayer"],video' : '[data-testid="tweetPhoto"],img[src*="pbs.twimg.com/media/"],img[data-testid="card_img"],[data-testid="card.layoutLarge.media"] img';
-    const containsPost = (node: HTMLElement): boolean => [...node.querySelectorAll('[data-testid="tweetText"],[data-testid="User-Name"],[data-testid^="UserAvatar"],time,[role="group"]')]
+    const articleContent = '[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"],[data-block="true"]';
+    const containsPost = (node: HTMLElement): boolean => node.matches(articleContent) || [...node.querySelectorAll(`[data-testid="tweetText"],[data-testid="User-Name"],[data-testid^="UserAvatar"],time,[role="group"],${articleContent}`)]
       .some(item => !item.closest('[data-testid="videoPlayer"],[data-testid="videoComponent"],[data-ft-owned]'));
     const desired = new Set<HTMLElement>(mediaRoots);
     for (const player of mediaRoots ? [] : document.querySelectorAll<HTMLElement>(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {

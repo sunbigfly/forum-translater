@@ -47,6 +47,16 @@ it('reuses recent empty results but reanalyses expired or legacy empty caches', 
   vi.mocked(requestVocabularyText).mockResolvedValue(JSON.stringify([{ ...word, word: 'substantial', level: 'CET6' }]));
   expect(await load()).toHaveLength(1); expect(requestVocabularyText).toHaveBeenCalledTimes(3);
 });
+it('reuses vocabulary completed by another caller during retry backoff', async () => {
+  const settings = { ...DEFAULTS, ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com/v1', apiKey: 'test-only', model: 'test' } };
+  const load = (): Promise<VocabularyWord[]> => collectVocabulary('substantial effort', settings, tasks, new AbortController().signal);
+  vi.mocked(requestVocabularyText).mockRejectedValueOnce(new Error('词汇网络失败')).mockResolvedValue('[]');
+  const first = load();
+  await vi.waitFor(() => expect(requestVocabularyText).toHaveBeenCalledOnce());
+  await expect(load()).resolves.toEqual([]);
+  await expect(first).resolves.toEqual([]);
+  expect(requestVocabularyText).toHaveBeenCalledTimes(2);
+});
 it('shows only three compact words and expands examples and remaining words on demand', async () => {
   const source = 'substantial coherent inevitable profound';
   const selected = source.split(' ').map(value => ({ ...word, word: value, level: 'CET6', example: source, memoryExample: `This is ${value}.`, memoryMeaning: '这需要大量的努力。', memoryTerm: value === 'substantial' ? '大量的' : '不存在的对应词' }));

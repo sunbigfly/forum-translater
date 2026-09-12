@@ -21,6 +21,9 @@ export class AiBatcher {
     this.tasks.setForeground([...this.foregroundKeys, ...[...this.active].filter(job => this.foregroundKeys.has(job.key) && job.batch).map(job => job.batch?.key ?? '')]);
   }
   constructor(private readonly ai: AiProfile, private readonly tasks: TranslationTaskManager) {}
+  hasPendingVocabulary(key: string): boolean {
+    return [...this.active].some(job => job.key === key && !job.cancelled && !!job.onVocabulary);
+  }
   deprioritize(key: string): void {
     for (const job of this.active) if (job.key === key) {
       job.priority = 'prefetch';
@@ -48,7 +51,7 @@ export class AiBatcher {
       const job: Job = { ...section, key, priority, signal, partial, resolve, reject, cleanup: () => signal.removeEventListener('abort', abort), cancelled: false, delivered: false };
       const abort = (): void => {
         job.cancelled = true; job.cleanup(); this.active.delete(job); reject(new DOMException('已取消', 'AbortError'));
-        if (job.batch?.jobs.every(item => item.cancelled || item.delivered)) job.batch.controller.abort();
+        if (job.batch?.jobs.every(item => item.cancelled || item.delivered && !item.onVocabulary)) job.batch.controller.abort();
       };
       signal.addEventListener('abort', abort, { once: true });
       this.active.add(job); this.pending.push(job);
@@ -82,19 +85,24 @@ export class AiBatcher {
         batch.attempt++;
         const remaining = unique.filter(item => jobs.some(job => job.key === item.key && !job.cancelled && !job.delivered));
         if (!remaining.length) return;
-        const deliver = (index: number, text: string, complete: boolean, finished = false): void => {
+        const deliver = (index: number, text: string, complete: boolean): void => {
           const key = remaining[index]?.key;
           for (const job of jobs) if (job.key === key && !job.cancelled && !job.delivered) {
-            if (!complete || job.onVocabulary && !finished) job.partial(text);
-            if (complete && (!job.onVocabulary || finished)) { job.delivered = true; job.resolve(text); }
+            job.partial(text);
+            if (complete) { job.delivered = true; job.resolve(text); }
           }
         };
         const characters = aiEntries(remaining).length;
         const priority = jobs.some(job => job.priority === 'visible' || job.priority === 'visible-batch') ? 'visible-batch' : jobs[0]?.priority ?? 'prefetch';
         const request = this.tasks.request({ key: batch.key, serviceKey: `ai:${normalizeAiBaseUrl(this.ai.baseUrl)}:${this.ai.model}`, priority, signal: batch.controller.signal, quota: this.ai, estimatedTokens: Math.ceil((characters + this.ai.prompt.length + 400) * 1.5) }, signal => translateAiBatch(remaining, this.ai, signal, deliver));
         this.setForeground(this.foregroundKeys);
-        const values = await request;
-        values.forEach((value, index) => deliver(index, value, true, true));
+        try {
+          const values = await request;
+          values.forEach((value, index) => deliver(index, value, true));
+        } catch (error) {
+          // Completed text remains usable even when the vocabulary tail fails.
+          if (jobs.some(job => !job.cancelled && !job.delivered)) throw error;
+        }
       }, batch.controller.signal).catch((error: unknown) => {
         for (const job of jobs) if (!job.cancelled && !job.delivered) job.reject(error);
       }).finally(() => { for (const job of jobs) { job.cleanup(); this.active.delete(job); } });

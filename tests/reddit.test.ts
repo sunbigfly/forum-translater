@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { discover, sourceSnapshot } from '../src/reddit';
+import { translationSectionPlans } from '../src/translation/translation-text';
 import { normalizeSettings } from '../src/settings';
 
 describe('Reddit content owners', () => {
@@ -51,4 +52,29 @@ it('discovers X tweet, reply and quote text without usernames, controls or trans
   const first = candidates[0]; if (!first) throw new Error('Missing tweet');
   expect(sourceSnapshot(first.element).querySelector('a')?.getAttribute('href')).toBe('https://example.com/');
   expect(sourceSnapshot(first.element).querySelector('br')).not.toBeNull();
+});
+
+it('discovers Article titles and rich text once, including standalone posts but excluding editors', () => {
+  document.body.innerHTML = `<main><div data-testid="twitterArticleReadView">
+    <h1 data-testid="twitter-article-title">Article title</h1>
+    <div data-testid="twitterArticleRichTextView"><div data-testid="longformRichTextComponent">
+      <h2>Introduction</h2><div data-block="true"><div class="public-DraftStyleDefault-block">First paragraph</div></div>
+      <div data-block="true">Second paragraph</div><ul><li>First item</li><li>Second item</li></ul>
+      <pre><code>const answer = 42;</code></pre><img src="cover.png"><button>Share</button>
+    </div></div></div><div data-testid="tweetText">Standalone reply</div>
+    <div contenteditable="true"><div data-testid="longformRichTextComponent">Draft article</div></div>
+    <div data-ft-owned="translation"><div data-testid="twitterArticleTitle">Old translation</div></div></main>`;
+  const candidates = discover(document);
+  expect(candidates.map(item => item.kind)).toEqual(['title', ...Array.from({ length: 6 }, () => 'body')]);
+  expect(candidates.slice(1).map(item => item.element.textContent)).toEqual(['Introduction', 'First paragraph', 'Second paragraph', 'First item', 'Second item', 'Standalone reply']);
+  const body = document.querySelector<HTMLElement>('[data-testid="twitterArticleRichTextView"]'); if (!body) throw new Error('Missing article');
+  const origins = new Map<Node, HTMLElement>();
+  const snapshot = sourceSnapshot(body, origins);
+  expect(translationSectionPlans(snapshot).map(plan => plan.text)).toEqual([
+    'Introduction', 'First paragraph', 'Second paragraph', 'First item', 'Second item',
+  ]);
+  expect(snapshot.querySelector('pre code')?.textContent).toBe('const answer = 42;');
+  expect(snapshot.querySelector('button,img')).toBeNull();
+  expect([...origins.values()].some(node => node.classList.contains('public-DraftStyleDefault-block'))).toBe(true);
+  expect(discover(body)).toEqual(candidates.slice(1, 6));
 });
