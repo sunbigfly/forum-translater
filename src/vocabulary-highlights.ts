@@ -13,30 +13,66 @@ export function applyVocabularyInk(mark: HTMLElement, index: number): void {
   mark.style.setProperty('-webkit-box-decoration-break', 'clone');
 }
 
+interface HighlightRoot {
+  english: boolean;
+  identities: string[];
+  text: string | null;
+  marks: HTMLElement[];
+}
+
 export class VocabularyHighlights {
-  private marks: HTMLElement[] = [];
+  private roots = new Map<HTMLElement, HighlightRoot>();
   private dismiss: (() => void) | undefined;
-  private original: HTMLElement | undefined;
-  private translations: HTMLElement[] = [];
-  private identities: string[] = [];
-  private texts: (string | null)[] = [];
+  private popupAnchor: HTMLElement | undefined;
   constructor(private readonly show?: (anchor: HTMLElement, word: VocabularyWord) => () => void) {}
   apply(original: HTMLElement, translations: HTMLElement[], words: VocabularyWord[]): void {
+    if (!words.length) { this.clear(); return; }
     const identities = words.map(word => JSON.stringify(word));
-    const texts = [original, ...translations].map(node => node.textContent);
-    const append = this.original === original && translations.length === this.translations.length && translations.every((node, index) => node === this.translations[index])
-      && texts.length === this.texts.length && texts.every((value, index) => value === this.texts[index])
-      && this.identities.length <= identities.length && this.identities.every((value, index) => value === identities[index]) && this.marks.every(mark => mark.isConnected);
-    const start = append ? this.identities.length : 0;
-    if (!append) this.clear();
-    this.original = original; this.translations = [...translations]; this.identities = identities; this.texts = texts;
-    for (const [index, word] of words.entries()) {
-      if (index < start) continue;
-      this.mark(original, word.word, word.meaning, true, word, index);
-      if (word.translatedTerm) for (const translation of translations) this.mark(translation, word.translatedTerm, word.word, false, word, index);
+    const targets = new Map([[original, true], ...translations.map(root => [root, false] as const)]);
+    for (const root of this.roots.keys()) if (!targets.has(root)) this.clearRoot(root);
+    for (const [root, english] of targets) {
+      // Do not rescan incomplete Chinese text on every streamed fragment.
+      if (!english && root.hasAttribute('data-ft-streaming')) { this.clearRoot(root); continue; }
+      const text = english ? this.originalText(root) : root.textContent;
+      let state = this.roots.get(root);
+      const append = state && state.english === english && state.text === text
+        && state.identities.length <= identities.length && state.identities.every((value, index) => value === identities[index])
+        && state.marks.every(mark => mark.isConnected && root.contains(mark));
+      const start = append && state ? state.identities.length : 0;
+      if (!append) {
+        this.clearRoot(root);
+        state = { english, identities, text, marks: [] };
+        this.roots.set(root, state);
+      }
+      if (!state) continue;
+      state.identities = identities;
+      for (const [index, word] of words.entries()) {
+        if (index < start) continue;
+        const term = english ? word.word : word.translatedTerm;
+        if (term) state.marks.push(...this.mark(root, term, english ? word.meaning : word.word, english, word, index));
+      }
     }
   }
-  private mark(root: HTMLElement, term: string, hint: string, english: boolean, word: VocabularyWord, index: number): void {
+  private originalText(root: HTMLElement): string {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL, {
+      acceptNode: node => node instanceof Element && node.matches('[data-ft-owned]') ? NodeFilter.FILTER_REJECT
+        : node instanceof Text ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP,
+    });
+    const parts: string[] = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) parts.push(node.textContent ?? '');
+    return parts.join('');
+  }
+  private clearRoot(root: HTMLElement): void {
+    const state = this.roots.get(root);
+    if (!state) return;
+    if (this.popupAnchor && state.marks.includes(this.popupAnchor)) {
+      this.dismiss?.(); this.dismiss = undefined; this.popupAnchor = undefined;
+    }
+    for (const mark of state.marks) mark.replaceWith(...mark.childNodes);
+    this.roots.delete(root);
+  }
+  private mark(root: HTMLElement, term: string, hint: string, english: boolean, word: VocabularyWord, index: number): HTMLElement[] {
+    const marks: HTMLElement[] = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); const texts: Text[] = [];
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const parent = node.parentElement;
@@ -56,12 +92,16 @@ export class VocabularyHighlights {
         if (this.show) {
           mark.removeAttribute('title'); mark.tabIndex = 0;
           mark.setAttribute('aria-label', `${word.word}：${word.meaning}`);
-          const open = (): void => { this.dismiss?.(); this.dismiss = this.show?.(mark, word); };
+          const open = (): void => { this.dismiss?.(); this.popupAnchor = mark; this.dismiss = this.show?.(mark, word); };
           mark.addEventListener('pointerenter', open); mark.addEventListener('focus', open);
         }
-        selected.before(mark); mark.append(selected); this.marks.push(mark);
+        selected.before(mark); mark.append(selected); marks.push(mark);
       }
     }
+    return marks;
   }
-  clear(): void { this.dismiss?.(); this.dismiss = undefined; for (const mark of this.marks) mark.replaceWith(...mark.childNodes); this.marks = []; this.original = undefined; this.translations = []; this.identities = []; this.texts = []; }
+  clear(): void {
+    this.dismiss?.(); this.dismiss = undefined; this.popupAnchor = undefined;
+    for (const root of this.roots.keys()) this.clearRoot(root);
+  }
 }

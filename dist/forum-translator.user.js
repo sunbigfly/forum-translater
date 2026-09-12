@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.5
+// @version      0.2.6
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -744,11 +744,6 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
     placeholder.className = "hnr-translation-placeholder";
     placeholder.setAttribute("role", "status");
     placeholder.setAttribute("aria-label", "正在加载译文");
-    placeholder.append(
-      document2.createElement("span"),
-      document2.createElement("span"),
-      document2.createElement("span")
-    );
     return placeholder;
   }
   function translationFailurePlaceholder(document2) {
@@ -765,30 +760,35 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
     else if (visualState.streaming.has(index)) target.classList.add("is-streaming");
     else target.classList.add("is-loading");
   }
-  function renderTranslationSections(node2, translations, visualState) {
-    const plans = translationSectionPlans(node2);
-    const clone = node2.cloneNode(true);
-    for (const plan of plans) {
-      const translation = translations.get(plan.index);
-      if (translation === void 0 && !visualState?.pending.has(plan.index)) continue;
-      const index = plan.index;
-      const source = plan.path.length === 0 ? node2 : nodeAtPath(node2, plan.path);
-      const target = plan.path.length === 0 ? clone : nodeAtPath(clone, plan.path);
-      if (!source || !target) return null;
-      if (translation === void 0) target.replaceChildren(
-        visualState?.failed.has(index) ? translationFailurePlaceholder(node2.ownerDocument) : translationLoadingPlaceholder(node2.ownerDocument)
-      );
-      else {
-        const fragment = renderTranslationText(source, translation, visualState?.streaming?.has(index));
-        if (!fragment) return null;
-        target.replaceChildren(fragment);
-      }
-      applyTranslationVisualState(target, index, visualState);
+  var TranslationSectionsRenderer = class {
+    sections;
+    constructor(node2, output) {
+      const plans = translationSectionPlans(node2);
+      const clone = node2.cloneNode(true);
+      this.sections = plans.flatMap((plan) => {
+        const source = nodeAtPath(node2, plan.path);
+        const target = plan.path.length ? nodeAtPath(clone, plan.path) : output;
+        return source && target ? [{ plan, source, target }] : [];
+      });
+      output.replaceChildren(...clone.childNodes);
     }
-    const output = node2.ownerDocument.createDocumentFragment();
-    output.append(...clone.childNodes);
-    return output;
-  }
+    render(translations, state) {
+      for (const section of this.sections) {
+        const { plan, source, target } = section;
+        const translation = translations.get(plan.index);
+        const stamp = JSON.stringify([translation, state.pending.has(plan.index), state.failed.has(plan.index), state.streaming.has(plan.index)]);
+        if (section.stamp === stamp) continue;
+        const fragment = translation === void 0 ? null : renderTranslationText(source, translation, state.streaming.has(plan.index));
+        if (translation !== void 0 && !fragment) continue;
+        if (fragment) target.replaceChildren(fragment);
+        else if (state.pending.has(plan.index)) target.replaceChildren(state.failed.has(plan.index) ? translationFailurePlaceholder(source.ownerDocument) : translationLoadingPlaceholder(source.ownerDocument));
+        else target.replaceChildren(...source.cloneNode(true).childNodes);
+        target.classList.remove("hnr-translation-section", "is-loading", "is-streaming", "is-failed");
+        applyTranslationVisualState(target, plan.index, state);
+        section.stamp = stamp;
+      }
+    }
+  };
   function translationProtectedTokensMatch(source, translation) {
     const tokens = (value) => Object.freeze(
       [...value.matchAll(PROTECTED_TOKEN_PATTERN)].map((match) => match[0]).sort()
@@ -2214,29 +2214,61 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     constructor(show) {
       this.show = show;
     }
-    marks = [];
+    roots = /* @__PURE__ */ new Map();
     dismiss;
-    original;
-    translations = [];
-    identities = [];
-    texts = [];
+    popupAnchor;
     apply(original2, translations, words2) {
+      if (!words2.length) {
+        this.clear();
+        return;
+      }
       const identities = words2.map((word) => JSON.stringify(word));
-      const texts = [original2, ...translations].map((node2) => node2.textContent);
-      const append = this.original === original2 && translations.length === this.translations.length && translations.every((node2, index) => node2 === this.translations[index]) && texts.length === this.texts.length && texts.every((value, index) => value === this.texts[index]) && this.identities.length <= identities.length && this.identities.every((value, index) => value === identities[index]) && this.marks.every((mark) => mark.isConnected);
-      const start = append ? this.identities.length : 0;
-      if (!append) this.clear();
-      this.original = original2;
-      this.translations = [...translations];
-      this.identities = identities;
-      this.texts = texts;
-      for (const [index, word] of words2.entries()) {
-        if (index < start) continue;
-        this.mark(original2, word.word, word.meaning, true, word, index);
-        if (word.translatedTerm) for (const translation of translations) this.mark(translation, word.translatedTerm, word.word, false, word, index);
+      const targets = new Map([[original2, true], ...translations.map((root) => [root, false])]);
+      for (const root of this.roots.keys()) if (!targets.has(root)) this.clearRoot(root);
+      for (const [root, english] of targets) {
+        if (!english && root.hasAttribute("data-ft-streaming")) {
+          this.clearRoot(root);
+          continue;
+        }
+        const text2 = english ? this.originalText(root) : root.textContent;
+        let state = this.roots.get(root);
+        const append = state && state.english === english && state.text === text2 && state.identities.length <= identities.length && state.identities.every((value, index) => value === identities[index]) && state.marks.every((mark) => mark.isConnected && root.contains(mark));
+        const start = append && state ? state.identities.length : 0;
+        if (!append) {
+          this.clearRoot(root);
+          state = { english, identities, text: text2, marks: [] };
+          this.roots.set(root, state);
+        }
+        if (!state) continue;
+        state.identities = identities;
+        for (const [index, word] of words2.entries()) {
+          if (index < start) continue;
+          const term = english ? word.word : word.translatedTerm;
+          if (term) state.marks.push(...this.mark(root, term, english ? word.meaning : word.word, english, word, index));
+        }
       }
     }
+    originalText(root) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_ALL, {
+        acceptNode: (node2) => node2 instanceof Element && node2.matches("[data-ft-owned]") ? NodeFilter.FILTER_REJECT : node2 instanceof Text ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP
+      });
+      const parts = [];
+      for (let node2 = walker.nextNode(); node2; node2 = walker.nextNode()) parts.push(node2.textContent ?? "");
+      return parts.join("");
+    }
+    clearRoot(root) {
+      const state = this.roots.get(root);
+      if (!state) return;
+      if (this.popupAnchor && state.marks.includes(this.popupAnchor)) {
+        this.dismiss?.();
+        this.dismiss = void 0;
+        this.popupAnchor = void 0;
+      }
+      for (const mark of state.marks) mark.replaceWith(...mark.childNodes);
+      this.roots.delete(root);
+    }
     mark(root, term, hint, english, word, index) {
+      const marks = [];
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       const texts = [];
       for (let node2 = walker.nextNode(); node2; node2 = walker.nextNode()) {
@@ -2263,6 +2295,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             mark.setAttribute("aria-label", `${word.word}：${word.meaning}`);
             const open = () => {
               this.dismiss?.();
+              this.popupAnchor = mark;
               this.dismiss = this.show?.(mark, word);
             };
             mark.addEventListener("pointerenter", open);
@@ -2270,19 +2303,16 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           }
           selected.before(mark);
           mark.append(selected);
-          this.marks.push(mark);
+          marks.push(mark);
         }
       }
+      return marks;
     }
     clear() {
       this.dismiss?.();
       this.dismiss = void 0;
-      for (const mark of this.marks) mark.replaceWith(...mark.childNodes);
-      this.marks = [];
-      this.original = void 0;
-      this.translations = [];
-      this.identities = [];
-      this.texts = [];
+      this.popupAnchor = void 0;
+      for (const root of this.roots.keys()) this.clearRoot(root);
     }
   };
 
@@ -2509,18 +2539,30 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     const loadExample = createExampleLoader(service, controller.signal);
     const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl, loadExample));
     let currentWords = [];
+    let highlightTimer;
     const observeTranslations = () => {
       if (targets) translationObserver.observe(targets.original, { childList: true, characterData: true, subtree: true });
-      for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true });
+      for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["data-ft-streaming"] });
     };
     const refreshHighlights = () => {
       if (!targets || controller.signal.aborted) return;
+      clearTimeout(highlightTimer);
+      highlightTimer = void 0;
       translationObserver.disconnect();
-      highlights.clear();
-      highlights.apply(targets.original, targets.translations, currentWords);
-      observeTranslations();
+      try {
+        highlights.apply(targets.original, targets.translations, currentWords);
+      } finally {
+        observeTranslations();
+      }
     };
-    const translationObserver = new MutationObserver(refreshHighlights);
+    const translationObserver = new MutationObserver((records) => {
+      if (!currentWords.length || controller.signal.aborted) return;
+      if (records.every((record3) => {
+        const target = record3.target instanceof Element ? record3.target : record3.target.parentElement;
+        return !!target?.closest('[data-ft-owned="translation"][data-ft-streaming]');
+      })) return;
+      highlightTimer ??= setTimeout(refreshHighlights, 120);
+    });
     observeTranslations();
     let running = false;
     let stopCombined;
@@ -2684,6 +2726,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     void Promise.resolve().then(load);
     return () => {
       controller.abort();
+      clearTimeout(highlightTimer);
       stopCombined?.();
       visibility?.disconnect();
       translationObserver.disconnect();
@@ -3583,12 +3626,19 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     }
     render(owner, paint) {
       this.paints.set(owner, paint);
-      this.timer ??= setTimeout(() => {
-        this.timer = void 0;
-        const batch = [...this.paints.values()];
-        this.paints.clear();
-        for (const update of batch) update();
-      }, 80);
+      this.timer ??= setTimeout(() => this.paintNext(), 80);
+    }
+    paintNext() {
+      this.timer = void 0;
+      const next = this.paints.entries().next().value;
+      if (!next) return;
+      const [owner, update] = next;
+      this.paints.delete(owner);
+      try {
+        update();
+      } finally {
+        if (this.paints.size && !this.timer) this.timer = setTimeout(() => this.paintNext(), 16);
+      }
     }
     release(owner) {
       this.paints.delete(owner);
@@ -3950,6 +4000,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     }
   };
 
+  // src/dom-mutations.ts
+  function isOwnedMutation(record3) {
+    const target = record3.target instanceof Element ? record3.target : record3.target.parentElement;
+    if (target?.closest("[data-ft-owned]")) return true;
+    if (record3.type !== "childList") return false;
+    const changed = [...record3.addedNodes, ...record3.removedNodes];
+    return changed.length > 0 && changed.every((node2) => node2 instanceof Element && node2.matches("[data-ft-owned]"));
+  }
+
   // src/runtime.ts
   function matchTextStyle(target, source) {
     const style = getComputedStyle(source);
@@ -3983,24 +4042,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         }
         this.updateForeground();
       });
-      this.mutations = new MutationObserver((records) => {
-        let relevant = location.href !== this.route;
-        for (const record3 of records) {
-          const target = record3.target instanceof Element ? record3.target : record3.target.parentElement;
-          if (!target || target.closest(OWNED)) continue;
-          if (record3.type === "childList") {
-            const changed = [...record3.addedNodes, ...record3.removedNodes];
-            if (changed.length && changed.every((node2) => node2 instanceof Element && node2.matches(OWNED))) continue;
-            for (const node2 of record3.addedNodes) if (node2 instanceof Element && !node2.matches(OWNED)) this.roots.add(node2);
-          }
-          relevant = true;
-          for (const entry of this.entries.values()) {
-            if (entry.element.contains(target) || target.contains(entry.element)) this.roots.add(entry.element);
-          }
-          if (record3.type !== "childList") this.roots.add(target);
-        }
-        if (relevant) this.schedule();
-      });
+      this.mutations = new MutationObserver((records) => this.onMutations(records));
       this.mutations.observe(document.body, {
         childList: true,
         subtree: true,
@@ -4033,6 +4075,33 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     setTranslationTheme(theme) {
       this.settings.translationTheme = theme;
       for (const entry of this.entries.values()) for (const box of [entry.box, ...entry.inlineBoxes]) if (box) box.dataset.translationTheme = theme;
+    }
+    onMutations(records) {
+      let relevant = location.href !== this.route;
+      for (const record3 of records) {
+        const target = record3.target instanceof Element ? record3.target : record3.target.parentElement;
+        if (!target || isOwnedMutation(record3)) continue;
+        if (record3.type === "childList") {
+          for (const node2 of record3.addedNodes) if (node2 instanceof Element && !node2.matches(OWNED)) this.roots.add(node2);
+        }
+        relevant = true;
+        const changed = record3.type === "childList" ? [...record3.addedNodes, ...record3.removedNodes] : null;
+        for (const entry of this.entries.values()) {
+          const changedOwner = !changed || changed.some((node2) => node2.contains(entry.element));
+          if (entry.element.contains(target) || target.contains(entry.element) && changedOwner) {
+            entry.sourceSignature = null;
+            this.roots.add(entry.element);
+          }
+        }
+        if (record3.type !== "childList") this.roots.add(target);
+      }
+      if (relevant) this.schedule();
+    }
+    sourceMatches(entry) {
+      const pending = this.mutations.takeRecords();
+      if (pending.length) this.onMutations(pending);
+      entry.sourceSignature ??= sourceSnapshot(entry.element).innerHTML;
+      return entry.sourceSignature === entry.signature;
     }
     onCommentExpansion = (event) => {
       for (const node2 of event.composedPath()) {
@@ -4150,6 +4219,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             originals: new OriginalVisibility(),
             learning: null,
             signature,
+            sourceSignature: signature,
             identity,
             owner: sameContent ? existing.owner : String(++this.sequence)
           };
@@ -4235,6 +4305,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const failureReasons = /* @__PURE__ */ new Map();
       const streaming = /* @__PURE__ */ new Set();
       const rendered = /* @__PURE__ */ new Map();
+      let renderedState;
+      let sectionRenderer;
       const box = document.createElement("div");
       box.dataset.ftOwned = "translation";
       box.className = `ft-translation${this.translationOnly ? " ft-translation-only" : ""}${entry.kind === "title" ? " ft-translation-title" : ""}`;
@@ -4292,7 +4364,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         }
         for (const separator of x?.separators ?? []) entry.originals.hideRange(separator);
       }
-      const current = () => !controller.signal.aborted && !this.destroyed && (this.route === location.href || isXPostBackground(entry.element) || isXPostBackgroundRoute(entry.element)) && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity && sourceSnapshot(entry.element).innerHTML === entry.signature;
+      const current = () => !controller.signal.aborted && !this.destroyed && (this.route === location.href || isXPostBackground(entry.element) || isXPostBackgroundRoute(entry.element)) && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity && this.sourceMatches(entry);
       const running = /* @__PURE__ */ new Set();
       let statusTimer;
       let startedAt = Date.now();
@@ -4331,12 +4403,13 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
               else if (placement?.range) entry.originals.hideRange(placement.range);
             }
             const value = translations.get(plan.index);
-            const stamp = JSON.stringify([value, pending.has(plan.index), failed.has(plan.index)]);
-            if (rendered.get(plan.index) === stamp) continue;
-            rendered.set(plan.index, stamp);
+            target.toggleAttribute("data-ft-streaming", streaming.has(plan.index));
+            const stamp2 = JSON.stringify([value, pending.has(plan.index), failed.has(plan.index), streaming.has(plan.index), failureReasons.get(plan.index)]);
+            if (rendered.get(plan.index) === stamp2) continue;
+            rendered.set(plan.index, stamp2);
             if (value !== void 0) {
-              const fragment2 = renderTranslationText(source, value, streaming.has(plan.index));
-              if (fragment2) target.replaceChildren(fragment2);
+              const fragment = renderTranslationText(source, value, streaming.has(plan.index));
+              if (fragment) target.replaceChildren(fragment);
             } else if (pending.has(plan.index)) {
               const status = document.createElement("span");
               status.className = failed.has(plan.index) ? "hnr-translation-failure" : "hnr-translation-placeholder";
@@ -4357,11 +4430,17 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           }
           return;
         }
+        const stamp = JSON.stringify(plans.map((plan) => [translations.get(plan.index), pending.has(plan.index), failed.has(plan.index), streaming.has(plan.index), failureReasons.get(plan.index)]));
+        if (renderedState === stamp) return;
+        renderedState = stamp;
+        box.toggleAttribute("data-ft-streaming", streaming.size > 0);
         if (this.translationOnly && pending.size === 0 && failed.size === 0) entry.originals.hide(entry.element);
-        const fragment = renderTranslationSections(snapshot, translations, { pending, failed, streaming });
-        if (fragment) box.replaceChildren(fragment);
+        sectionRenderer ??= new TranslationSectionsRenderer(snapshot, box);
+        sectionRenderer.render(translations, { pending, failed, streaming });
+        for (const status of box.querySelectorAll(':scope > [data-ft-owned="translation-status"]')) status.remove();
         if (failed.size) {
           const reason = document.createElement("span");
+          reason.dataset.ftOwned = "translation-status";
           reason.className = "hnr-translation-failure";
           reason.setAttribute("role", "status");
           reason.textContent = [...new Set(failureReasons.values())].join("；");
@@ -4370,6 +4449,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         if (entry.kind === "title" && pending.size === 0 && failed.size === 0) this.tabTitle.update(snapshot.textContent ?? "", box.textContent ?? "");
         if (failed.size) {
           const retry = document.createElement("button");
+          retry.dataset.ftOwned = "translation-status";
           retry.type = "button";
           retry.textContent = "翻译失败 · 点击重试";
           retry.onclick = () => {
@@ -4404,11 +4484,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         try {
           const value = await this.service.section(plan.text, entry.owner, entry.visible ? "visible" : retry ? "interactive" : priority, controller.signal, (partial) => {
             if (controller.signal.aborted || !box.isConnected || previews.has(index)) return;
-            const first = !streaming.has(index);
             translations.set(index, partial);
             streaming.add(index);
-            if (first) render();
-            else this.service.worker.render(entry.owner, render);
+            this.service.worker.render(entry.owner, render);
           }, { before: "", after: "", post: postContext, index, ...thread ? { thread } : {} });
           if (!current()) return;
           previews.delete(index);
@@ -5663,7 +5741,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         this.save(collapsed);
       };
       this.toggle = toggle;
-      this.observer = new MutationObserver(() => {
+      this.observer = new MutationObserver((records) => {
+        if (records.every(isOwnedMutation)) return;
         this.timer ??= setTimeout(() => {
           this.timer = void 0;
           this.scan();
@@ -5952,7 +6031,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       if (!/(^|\.)reddit\.com$/.test(location.hostname)) return;
       this.videos = new XVideoResize("video", "reddit");
       this.images = new XVideoResize("image", "reddit");
-      this.observer = new MutationObserver(() => {
+      this.observer = new MutationObserver((records) => {
+        if (records.every(isOwnedMutation)) return;
         this.timer ??= setTimeout(() => {
           this.timer = void 0;
           this.reconcile();
@@ -6008,7 +6088,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     timer;
     constructor() {
       if (!/(^|\.)reddit\.com$/.test(location.hostname)) return;
-      this.observer = new MutationObserver(() => {
+      this.observer = new MutationObserver((records) => {
+        if (records.every(isOwnedMutation)) return;
         this.timer ??= setTimeout(() => {
           this.timer = void 0;
           this.reconcile();
@@ -6055,7 +6136,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
 [data-ft-owned="translation"] a:hover{text-decoration:underline}
 [data-ft-owned="translation"] pre{white-space:pre-wrap}
 [data-ft-owned="translation"] button{font:inherit;font-size:12px;color:inherit;background:transparent;border:1px solid #8888;border-radius:6px;padding:4px 8px;cursor:pointer}
-[data-ft-owned="translation"] .hnr-translation-placeholder{display:block;min-height:1.3em;opacity:.45}
+[data-ft-owned="translation"] .hnr-translation-placeholder{display:block;min-height:1.65em;min-height:1lh;opacity:.45;overflow-anchor:none}
+[data-ft-owned="translation"] :is(.hnr-translation-placeholder,.hnr-translation-placeholder *, .hnr-translation-section.is-loading,.hnr-translation-section.is-streaming),[data-ft-owned="translation"] :is(.hnr-translation-placeholder,.hnr-translation-placeholder *)::before,[data-ft-owned="translation"] :is(.hnr-translation-placeholder,.hnr-translation-placeholder *)::after{animation:none!important;transition:none!important}
 [data-ft-owned="translation"] .hnr-translation-placeholder::after{content:'…';font-size:12px}
 [data-ft-owned="translation"] .hnr-translation-failure{font-size:12px;opacity:.65}
 

@@ -1,7 +1,26 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from "vitest";
-import { renderBilingualSections, renderTranslationSections, renderTranslationText, translationBlockNeedsTranslation, translationProtectedTokensMatch, translationSectionPlans, translationTextPlan } from "../src/translation/translation-text";
+import { renderBilingualSections, renderTranslationSections, renderTranslationText, TranslationSectionsRenderer, translationBlockNeedsTranslation, translationProtectedTokensMatch, translationSectionPlans, translationTextPlan } from "../src/translation/translation-text";
+
+it('preserves other sections and placeholders through streaming, completion and retry', () => {
+  const source = document.createElement('div'); source.innerHTML = '<p>First paragraph</p><p>Second paragraph <a href="https://example.com">link</a></p>';
+  const output = document.createElement('div'); const renderer = new TranslationSectionsRenderer(source, output);
+  const values = new Map<number, string>(); const pending = new Set([0, 1]); const streaming = new Set<number>(); const failed = new Set<number>();
+  renderer.render(values, { pending, streaming, failed });
+  const paragraphs = [...output.querySelectorAll('p')]; const placeholder = paragraphs[1]?.firstChild;
+  values.set(0, '第一段'); streaming.add(0); renderer.render(values, { pending, streaming, failed });
+  expect(output.querySelectorAll('p')[0]).toBe(paragraphs[0]); expect(paragraphs[1]?.firstChild).toBe(placeholder);
+  pending.delete(0); streaming.delete(0); renderer.render(values, { pending, streaming, failed });
+  const completed = paragraphs[0]?.firstChild;
+  failed.add(1); renderer.render(values, { pending, streaming, failed });
+  expect(paragraphs[1]?.querySelector('.hnr-translation-failure')).not.toBeNull(); expect(paragraphs[0]?.firstChild).toBe(completed);
+  failed.delete(1); renderer.render(values, { pending, streaming, failed });
+  expect(paragraphs[0]?.firstChild).toBe(completed); expect(paragraphs[1]?.querySelector('.hnr-translation-placeholder')).not.toBeNull();
+  values.set(1, '第二段 ⟦0⟧'); pending.delete(1); renderer.render(values, { pending, streaming, failed });
+  expect(paragraphs[0]?.firstChild).toBe(completed); expect(paragraphs[1]?.querySelector('a')?.href).toBe('https://example.com/');
+  expect(output.querySelector('.hnr-translation-placeholder')).toBeNull();
+});
 
 describe("translation text", () => {
   it('renders a safe streaming prefix before remaining link tokens arrive', () => {

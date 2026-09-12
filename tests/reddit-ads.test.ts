@@ -4,6 +4,17 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { isRedditAd, RedditAds } from '../src/reddit-ads';
 
 let ads: RedditAds | undefined;
+
+it('does not rescan advertisements when owned translation text streams', async () => {
+  vi.useFakeTimers(); ads = new RedditAds(); await vi.advanceTimersByTimeAsync(300);
+  const scan = vi.spyOn(document, 'querySelectorAll');
+  try {
+    const translation = document.createElement('div'); translation.dataset.ftOwned = 'translation'; document.body.append(translation);
+    const text = document.createTextNode('译文'); translation.append(text); text.data = '完整译文';
+    await vi.advanceTimersByTimeAsync(300); translation.remove(); await vi.advanceTimersByTimeAsync(300);
+    expect(scan).not.toHaveBeenCalled();
+  } finally { scan.mockRestore(); }
+});
 afterEach(() => { ads?.destroy(); ads = undefined; document.body.replaceChildren(); vi.useRealTimers(); });
 
 it('hides sidebar ad slots including their heading while preserving recommendations and footer', async () => {

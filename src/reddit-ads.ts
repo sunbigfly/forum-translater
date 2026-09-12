@@ -1,3 +1,5 @@
+import { isOwnedMutation } from './dom-mutations';
+
 // Match dedicated ad hosts/slots, not arbitrary sidebar text containing "AD".
 // Hiding the host also covers creatives rendered inside its shadow root.
 const adContainerSelector = 'shreddit-ad-post,shreddit-comments-page-ad,shreddit-sidebar-ad,shreddit-display-ad,#right-rail-ad-slot';
@@ -22,7 +24,8 @@ export class RedditAds {
 
   constructor() {
     if (!/(^|\.)reddit\.com$/.test(location.hostname)) return;
-    this.observer = new MutationObserver(() => {
+    this.observer = new MutationObserver(records => {
+      if (records.every(isOwnedMutation)) return;
       this.timer ??= setTimeout(() => { this.timer = undefined; this.reconcile(); }, 150);
     });
     this.observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true,

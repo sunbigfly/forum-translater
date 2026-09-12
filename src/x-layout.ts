@@ -3,6 +3,7 @@ import { isXPostPath, XPostModal } from './x-post-modal';
 import { isXSite, type Settings } from './settings';
 import { XAds } from './x-ads';
 import { XVideoResize } from './x-video-resize';
+import { isOwnedMutation } from './dom-mutations';
 
 type LayoutSettings = Pick<Settings, 'xCollapseSidebar' | 'xHideFloatingIcons' | 'xHideRightSidebar' | 'xHideAds'>;
 const launchers = '[data-testid="GrokDrawer"],[data-testid="DMDrawer"],button[aria-label*="Grok"],[role="button"][aria-label*="Grok"],a[href="/i/grok"],[aria-label="Chat"],[aria-label="聊天"],[aria-label="Messages"],[aria-label="私信"]';
@@ -38,7 +39,10 @@ export class XLayout {
     const state = svg('M6 4.5h12A2.5 2.5 0 0 1 20.5 7v10a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 17V7A2.5 2.5 0 0 1 6 4.5ZM9 4.5v15M13.5 9l3 3-3 3', '0 0 24 24'); state.classList.add('ft-x-state'); hint.append(state); toggle.append(brand, hint);
     toggle.onclick = () => { const collapsed = !this.settings.xCollapseSidebar; this.update({ ...this.settings, xCollapseSidebar: collapsed }); this.save(collapsed); };
     this.toggle = toggle;
-    this.observer = new MutationObserver(() => { this.timer ??= setTimeout(() => { this.timer = undefined; this.scan(); }, 150); });
+    this.observer = new MutationObserver(records => {
+      if (records.every(isOwnedMutation)) return;
+      this.timer ??= setTimeout(() => { this.timer = undefined; this.scan(); }, 150);
+    });
     this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid'] });
     document.addEventListener('keydown', this.exitPost, true);
     this.update(settings);

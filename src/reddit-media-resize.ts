@@ -1,4 +1,5 @@
 import { XVideoResize } from './x-video-resize';
+import { isOwnedMutation } from './dom-mutations';
 
 // Only explicit post media slots: avatars, inline text images and vote bars stay outside.
 const mediaSelector = 'shreddit-post [slot="post-media-container"],shreddit-post [slot="post-media"],[data-testid="post-container"] [data-click-id="media"],.thing.link > .entry .expando';
@@ -15,7 +16,8 @@ export class RedditMediaResize {
     if (!/(^|\.)reddit\.com$/.test(location.hostname)) return;
     this.videos = new XVideoResize('video', 'reddit');
     this.images = new XVideoResize('image', 'reddit');
-    this.observer = new MutationObserver(() => {
+    this.observer = new MutationObserver(records => {
+      if (records.every(isOwnedMutation)) return;
       this.timer ??= setTimeout(() => { this.timer = undefined; this.reconcile(); }, 150);
     });
     this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['slot', 'src', 'data-click-id'] });

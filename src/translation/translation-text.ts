@@ -126,11 +126,6 @@ function translationLoadingPlaceholder(document: Document): HTMLElement {
   placeholder.className = "hnr-translation-placeholder";
   placeholder.setAttribute("role", "status");
   placeholder.setAttribute("aria-label", "正在加载译文");
-  placeholder.append(
-    document.createElement("span"),
-    document.createElement("span"),
-    document.createElement("span"),
-  );
   return placeholder;
 }
 
@@ -152,6 +147,38 @@ function applyTranslationVisualState(
   if (visualState.failed.has(index)) target.classList.add("is-failed");
   else if (visualState.streaming.has(index)) target.classList.add("is-streaming");
   else target.classList.add("is-loading");
+}
+
+/** Keep section nodes and pending placeholders stable as other sections change. */
+export class TranslationSectionsRenderer {
+  private readonly sections: { plan: TranslationSectionPlan; source: Element; target: Element; stamp?: string }[];
+  constructor(node: Element, output: Element) {
+    const plans = translationSectionPlans(node);
+    const clone = node.cloneNode(true) as Element;
+    this.sections = plans.flatMap(plan => {
+      const source = nodeAtPath(node, plan.path);
+      const target = plan.path.length ? nodeAtPath(clone, plan.path) : output;
+      return source && target ? [{ plan, source, target }] : [];
+    });
+    output.replaceChildren(...clone.childNodes);
+  }
+  render(translations: ReadonlyMap<number, string>, state: TranslationSectionVisualState): void {
+    for (const section of this.sections) {
+      const { plan, source, target } = section;
+      const translation = translations.get(plan.index);
+      const stamp = JSON.stringify([translation, state.pending.has(plan.index), state.failed.has(plan.index), state.streaming.has(plan.index)]);
+      if (section.stamp === stamp) continue;
+      const fragment = translation === undefined ? null : renderTranslationText(source, translation, state.streaming.has(plan.index));
+      if (translation !== undefined && !fragment) continue;
+      if (fragment) target.replaceChildren(fragment);
+      else if (state.pending.has(plan.index)) target.replaceChildren(state.failed.has(plan.index)
+        ? translationFailurePlaceholder(source.ownerDocument) : translationLoadingPlaceholder(source.ownerDocument));
+      else target.replaceChildren(...source.cloneNode(true).childNodes);
+      target.classList.remove('hnr-translation-section', 'is-loading', 'is-streaming', 'is-failed');
+      applyTranslationVisualState(target, plan.index, state);
+      section.stamp = stamp;
+    }
+  }
 }
 
 export function renderTranslationSections(

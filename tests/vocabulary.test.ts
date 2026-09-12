@@ -17,6 +17,29 @@ beforeEach(() => {
   vi.stubGlobal('crypto', webcrypto);
 });
 afterEach(() => { stopWordSpeech(); tasks.destroy(); vi.unstubAllGlobals(); vi.clearAllMocks(); document.body.replaceChildren(); });
+
+it('avoids highlighting streamed fragments and retains source marks without another vocabulary request', async () => {
+  vi.useFakeTimers();
+  const service = new TranslationService({ ...DEFAULTS, provider: 'ai', vocabulary: true }, new TranslationCache());
+  let publish: ((words: VocabularyWord[]) => void) | undefined;
+  const watch = vi.spyOn(service, 'watchVocabulary').mockImplementation((_source, callback) => { publish = callback; return () => undefined; });
+  const original = document.createElement('p'); original.textContent = 'A substantial meal.';
+  const translated = document.createElement('div'); translated.dataset.ftOwned = 'translation'; original.append(translated); document.body.append(original);
+  const destroy = mountVocabulary(translated, 'A substantial meal.', 'https://x.com/home', service, { original, translations: [translated] });
+  const scan = vi.spyOn(document, 'createTreeWalker');
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    publish?.([{ ...word, word: 'substantial', level: 'CET6', translatedTerm: '丰盛' }]);
+    const sourceMark = original.querySelector('[data-ft-word]'); expect(sourceMark).not.toBeNull();
+    scan.mockClear();
+    translated.setAttribute('data-ft-streaming', '');
+    for (let index = 0; index < 5; index++) { translated.textContent = `丰盛 ${index}`; await vi.advanceTimersByTimeAsync(120); }
+    expect(scan).not.toHaveBeenCalled(); expect(translated.querySelector('[data-ft-word]')).toBeNull();
+    translated.removeAttribute('data-ft-streaming'); translated.textContent = '一顿丰盛的饭。'; await vi.advanceTimersByTimeAsync(150);
+    expect(original.querySelector('[data-ft-word]')).toBe(sourceMark); expect(translated.querySelector('[data-ft-word]')?.textContent).toBe('丰盛');
+    expect(watch).toHaveBeenCalledOnce(); expect(requestVocabularyText).not.toHaveBeenCalled();
+  } finally { scan.mockRestore(); watch.mockRestore(); destroy(); service.destroy(); vi.useRealTimers(); }
+});
 it('deduplicates saved words and persists review progress across opening the wordbook', () => {
   saveWord(word, 'https://x.com/a/status/123?tracking=1'); saveWord({ ...word, word: 'Publish' }, 'https://x.com/');
   expect(readWordbook()).toHaveLength(1); expect(readWordbook()[0]?.sourceUrl).toBe('https://x.com/a/status/123');

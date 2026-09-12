@@ -6,7 +6,8 @@
 [data-ft-owned="translation"] a:hover{text-decoration:underline}
 [data-ft-owned="translation"] pre{white-space:pre-wrap}
 [data-ft-owned="translation"] button{font:inherit;font-size:12px;color:inherit;background:transparent;border:1px solid #8888;border-radius:6px;padding:4px 8px;cursor:pointer}
-[data-ft-owned="translation"] .hnr-translation-placeholder{display:block;min-height:1.3em;opacity:.45}
+[data-ft-owned="translation"] .hnr-translation-placeholder{display:block;min-height:1.65em;min-height:1lh;opacity:.45;overflow-anchor:none}
+[data-ft-owned="translation"] :is(.hnr-translation-placeholder,.hnr-translation-placeholder *, .hnr-translation-section.is-loading,.hnr-translation-section.is-streaming),[data-ft-owned="translation"] :is(.hnr-translation-placeholder,.hnr-translation-placeholder *)::before,[data-ft-owned="translation"] :is(.hnr-translation-placeholder,.hnr-translation-placeholder *)::after{animation:none!important;transition:none!important}
 [data-ft-owned="translation"] .hnr-translation-placeholder::after{content:'…';font-size:12px}
 [data-ft-owned="translation"] .hnr-translation-failure{font-size:12px;opacity:.65}
 

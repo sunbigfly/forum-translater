@@ -1,7 +1,26 @@
 // @vitest-environment jsdom
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { VocabularyHighlights } from '../src/vocabulary-highlights';
 import { sourceSnapshot } from '../src/reddit';
+
+it('keeps original highlights and their popup while nested translations stream and complete', () => {
+  const original = document.createElement('div'); original.textContent = 'substantial effort';
+  const translated = document.createElement('div'); translated.dataset.ftOwned = 'translation'; translated.textContent = '大量的努力';
+  original.append(translated); document.body.append(original);
+  const dismiss = vi.fn(); const highlights = new VocabularyHighlights(() => dismiss);
+  const word = { word: 'substantial', ipa: '', meaning: '大量的', example: '', level: 'CET6' as const, translatedTerm: '大量的' };
+  highlights.apply(original, [translated], [word]);
+  const originalMark = original.querySelector('[data-ft-word]'); originalMark?.dispatchEvent(new Event('pointerenter'));
+  translated.setAttribute('data-ft-streaming', ''); translated.textContent = '大量的';
+  highlights.apply(original, [translated], [word]);
+  expect(original.querySelector('[data-ft-word]')).toBe(originalMark);
+  expect(translated.querySelector('[data-ft-word]')).toBeNull(); expect(dismiss).not.toHaveBeenCalled();
+  translated.removeAttribute('data-ft-streaming'); translated.textContent = '大量的投入';
+  highlights.apply(original, [translated], [word]);
+  expect(original.querySelector('[data-ft-word]')).toBe(originalMark);
+  expect(translated.querySelector('[data-ft-word]')?.textContent).toBe('大量的'); expect(dismiss).not.toHaveBeenCalled();
+  highlights.clear(); expect(dismiss).toHaveBeenCalledOnce(); original.remove();
+});
 it('retains existing highlights and their open popup while appending another word', () => {
   const original = document.createElement('div'); original.textContent = 'substantial coherent'; document.body.append(original);
   const close = () => undefined; let closed = false;

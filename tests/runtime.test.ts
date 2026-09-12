@@ -4,6 +4,7 @@ import { RedditRuntime } from '../src/runtime';
 import { DEFAULTS } from '../src/settings';
 import { TranslationCache, TranslationService } from '../src/translation/service';
 import * as vocabulary from '../src/vocabulary';
+import * as reddit from '../src/reddit';
 
 class Observer {
   static instances: Observer[] = [];
@@ -31,6 +32,28 @@ beforeEach(() => {
 afterEach(() => { runtime?.destroy(); runtime = undefined; service.destroy(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); document.body.replaceChildren(); });
 function title(): HTMLElement { const element = document.querySelector<HTMLElement>('a[slot="title"]'); if (!element) throw new Error('Missing fixture'); return element; }
 async function settle(): Promise<void> { await vi.advanceTimersByTimeAsync(150); }
+
+it('reuses the source snapshot and section nodes while streaming, then rejects changed host content', async () => {
+  let partial: ((value: string) => void) | undefined; let finish: ((value: string) => void) | undefined;
+  const translate = vi.spyOn(service, 'section').mockResolvedValue('新译文').mockImplementationOnce((_text, _owner, _priority, _signal, onPartial) => {
+    partial = onPartial; return new Promise(resolve => { finish = resolve; });
+  });
+  runtime = new RedditRuntime(service.settings, service); Observer.instances[0]?.emit(title()); await settle();
+  const snapshot = vi.spyOn(reddit, 'sourceSnapshot');
+  partial?.('流式译文'); await settle();
+  const box = document.querySelector('[data-ft-owned="translation"]'); const paragraph = box?.firstChild; const text = paragraph?.firstChild;
+  partial?.('流式译文'); await settle();
+  expect(box?.firstChild).toBe(paragraph); expect(paragraph?.firstChild).toBe(text);
+  expect(snapshot).not.toHaveBeenCalled(); expect(translate).toHaveBeenCalledOnce();
+  const source = title(); const sibling = document.createElement('shreddit-post'); sibling.innerHTML = '<a slot="title">Unrelated loaded post</a>';
+  document.body.append(sibling); await settle(); partial?.('流式译文继续'); await settle();
+  expect(box?.firstChild).toBe(paragraph); expect(snapshot.mock.calls.filter(([element]) => element === source)).toHaveLength(0);
+  expect(translate).toHaveBeenCalledOnce();
+  const heading = title().querySelector('h1'); if (!heading) throw new Error('Missing heading');
+  heading.textContent = 'Updated source'; finish?.('旧译文'); await settle();
+  expect(document.querySelector('[data-ft-owned="translation"]')?.textContent).toBe('新译文');
+  expect(document.body.textContent).not.toContain('旧译文'); expect(translate).toHaveBeenCalledTimes(2);
+});
 it('changes the translation theme without replacing text or issuing translation requests', async () => {
   const translate = vi.spyOn(service, 'section').mockResolvedValue('你好');
   runtime = new RedditRuntime(service.settings, service); Observer.instances[0]?.emit(title()); await settle();

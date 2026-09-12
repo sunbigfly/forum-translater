@@ -31,10 +31,17 @@ export class TranslationWorkerController {
   format(source: string, value: unknown): string { return validateTranslation(source, value); }
   render(owner: string, paint: () => void): void {
     this.paints.set(owner, paint);
-    this.timer ??= setTimeout(() => {
-      this.timer = undefined; const batch = [...this.paints.values()]; this.paints.clear();
-      for (const update of batch) update();
-    }, 80);
+    this.timer ??= setTimeout(() => this.paintNext(), 80);
+  }
+  private paintNext(): void {
+    this.timer = undefined;
+    const next = this.paints.entries().next().value;
+    if (!next) return;
+    const [owner, update] = next;
+    this.paints.delete(owner);
+    // Yield between owners so scrolling can render between streamed updates.
+    try { update(); }
+    finally { if (this.paints.size && !this.timer) this.timer = setTimeout(() => this.paintNext(), 16); }
   }
   release(owner: string): void { this.paints.delete(owner); }
   destroy(): void { clearTimeout(this.timer); this.paints.clear(); this.batcher.destroy(); this.tasks.destroy(); }

@@ -9,12 +9,13 @@ import { contentIdentity, discover, isReadable, OWNED, sourceSnapshot } from './
 import { OriginalVisibility } from './original-visibility';
 import { isXSite, loadTranslationOnly, type Kind, type Settings, type TranslationTheme } from './settings';
 import { TranslationService } from './translation/service';
-import { renderTranslationText, renderTranslationSections, translationBlockNeedsTranslation, translationSectionPlans, translationTextPlan } from './translation/translation-text';
+import { renderTranslationText, TranslationSectionsRenderer, translationBlockNeedsTranslation, translationSectionPlans, translationTextPlan } from './translation/translation-text';
 import { TRANSLATION_PROMPT_VERSION } from './translation/translation-prompt';
+import { isOwnedMutation } from './dom-mutations';
 interface Entry {
   element: HTMLElement; kind: Kind; box: HTMLDivElement | null; controller: AbortController | null;
   near: boolean; visible: boolean; state: 'idle' | 'loading' | 'done' | 'error';
-  signature: string; identity: string; owner: string; completed: Map<number, string>; inlineBoxes: HTMLDivElement[]; originals: OriginalVisibility; learning: (() => void) | null;
+  signature: string; sourceSignature: string | null; identity: string; owner: string; completed: Map<number, string>; inlineBoxes: HTMLDivElement[]; originals: OriginalVisibility; learning: (() => void) | null;
 }
 function matchTextStyle(target: HTMLElement, source: Element): void {
   const style = getComputedStyle(source);
@@ -63,25 +64,7 @@ export class RedditRuntime {
       }
       this.updateForeground();
     });
-    this.mutations = new MutationObserver(records => {
-      let relevant = location.href !== this.route;
-      for (const record of records) {
-        const target = record.target instanceof Element ? record.target : record.target.parentElement;
-        if (!target || target.closest(OWNED)) continue;
-        if (record.type === 'childList') {
-          const changed = [...record.addedNodes, ...record.removedNodes];
-          if (changed.length && changed.every(node => node instanceof Element && node.matches(OWNED))) continue;
-          for (const node of record.addedNodes) if (node instanceof Element && !node.matches(OWNED)) this.roots.add(node);
-        }
-        relevant = true;
-        // Revisit affected content only; never rescan the whole document on scroll.
-        for (const entry of this.entries.values()) {
-          if (entry.element.contains(target) || target.contains(entry.element)) this.roots.add(entry.element);
-        }
-        if (record.type !== 'childList') this.roots.add(target);
-      }
-      if (relevant) this.schedule();
-    });
+    this.mutations = new MutationObserver(records => this.onMutations(records));
     this.mutations.observe(document.body, { childList: true, subtree: true, characterData: true,
       attributes: true, attributeFilter: ['hidden', 'collapsed', 'aria-hidden', 'aria-expanded', 'open', 'class', 'style', 'slot', 'id', 'thingid', 'post-id', 'lang', 'data-testid'] });
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -89,6 +72,34 @@ export class RedditRuntime {
     document.addEventListener('toggle', this.onCommentExpansion, true);
     window.addEventListener('popstate', this.onRoute);
     this.roots.add(document); this.reconcile();
+  }
+  private onMutations(records: MutationRecord[]): void {
+    let relevant = location.href !== this.route;
+    for (const record of records) {
+      const target = record.target instanceof Element ? record.target : record.target.parentElement;
+      if (!target || isOwnedMutation(record)) continue;
+      if (record.type === 'childList') {
+        for (const node of record.addedNodes) if (node instanceof Element && !node.matches(OWNED)) this.roots.add(node);
+      }
+      relevant = true;
+      const changed = record.type === 'childList' ? [...record.addedNodes, ...record.removedNodes] : null;
+      for (const entry of this.entries.values()) {
+        const changedOwner = !changed || changed.some(node => node.contains(entry.element));
+        if (entry.element.contains(target) || target.contains(entry.element) && changedOwner) {
+          entry.sourceSignature = null;
+          this.roots.add(entry.element);
+        }
+      }
+      if (record.type !== 'childList') this.roots.add(target);
+    }
+    if (relevant) this.schedule();
+  }
+  private sourceMatches(entry: Entry): boolean {
+    // Catch host mutations even if a promise resolves before the observer callback.
+    const pending = this.mutations.takeRecords();
+    if (pending.length) this.onMutations(pending);
+    entry.sourceSignature ??= sourceSnapshot(entry.element).innerHTML;
+    return entry.sourceSignature === entry.signature;
   }
   private onCommentExpansion = (event: Event): void => {
     // Reddit's expansion controls can live in shadow DOM; use the composed path.
@@ -175,7 +186,7 @@ export class RedditRuntime {
         const visibleNow = !document.hidden && rect.width > 0 && rect.height > 0
           && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
         const entry: Entry = { element, kind, box: null, controller: null, near: sameContent ? existing.near : false, visible: sameContent ? existing.visible : false,
-          state: 'idle', completed: new Map(), inlineBoxes: [], originals: new OriginalVisibility(), learning: null, signature, identity, owner: sameContent ? existing.owner : String(++this.sequence) };
+          state: 'idle', completed: new Map(), inlineBoxes: [], originals: new OriginalVisibility(), learning: null, signature, sourceSignature: signature, identity, owner: sameContent ? existing.owner : String(++this.sequence) };
         if (visibleNow) { entry.visible = true; entry.near = true; }
         this.entries.set(element, entry); this.nearObserver.observe(element); this.visibleObserver.observe(element);
         if (entry.near || entry.visible) this.start(entry);
@@ -242,6 +253,8 @@ export class RedditRuntime {
     const failureReasons = new Map<number, string>();
     const streaming = new Set<number>();
     const rendered = new Map<number, string>();
+    let renderedState: string | undefined;
+    let sectionRenderer: TranslationSectionsRenderer | undefined;
     const box = document.createElement('div'); box.dataset.ftOwned = 'translation'; box.className = `ft-translation${this.translationOnly ? ' ft-translation-only' : ''}${entry.kind === 'title' ? ' ft-translation-title' : ''}`;
     if (entry.kind === 'title') {
       const title = entry.element.querySelector('h1,h2,h3') ?? entry.element;
@@ -293,7 +306,7 @@ export class RedditRuntime {
     const current = (): boolean => !controller.signal.aborted && !this.destroyed
       && (this.route === location.href || isXPostBackground(entry.element) || isXPostBackgroundRoute(entry.element))
       && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity
-      && sourceSnapshot(entry.element).innerHTML === entry.signature;
+      && this.sourceMatches(entry);
     const running = new Set<number>();
     let statusTimer: ReturnType<typeof setInterval> | undefined;
     let startedAt = Date.now();
@@ -320,7 +333,8 @@ export class RedditRuntime {
           target.hidden = !translationBlockNeedsTranslation(plan.text, true);
           if (this.translationOnly && entry.completed.has(plan.index)) { const placement = placements[plan.index]; if (placement?.anchor) entry.originals.hide(placement.anchor); else if (placement?.range) entry.originals.hideRange(placement.range); }
           const value = translations.get(plan.index);
-          const stamp = JSON.stringify([value, pending.has(plan.index), failed.has(plan.index)]);
+          target.toggleAttribute('data-ft-streaming', streaming.has(plan.index));
+          const stamp = JSON.stringify([value, pending.has(plan.index), failed.has(plan.index), streaming.has(plan.index), failureReasons.get(plan.index)]);
           if (rendered.get(plan.index) === stamp) continue;
           rendered.set(plan.index, stamp);
           if (value !== undefined) { const fragment = renderTranslationText(source, value, streaming.has(plan.index)); if (fragment) target.replaceChildren(fragment); }
@@ -333,15 +347,20 @@ export class RedditRuntime {
         }
         return;
       }
+      const stamp = JSON.stringify(plans.map(plan => [translations.get(plan.index), pending.has(plan.index), failed.has(plan.index), streaming.has(plan.index), failureReasons.get(plan.index)]));
+      if (renderedState === stamp) return;
+      renderedState = stamp;
+      box.toggleAttribute('data-ft-streaming', streaming.size > 0);
       if (this.translationOnly && pending.size === 0 && failed.size === 0) entry.originals.hide(entry.element);
-      const fragment = renderTranslationSections(snapshot, translations, { pending, failed, streaming });
-      if (fragment) box.replaceChildren(fragment);
+      sectionRenderer ??= new TranslationSectionsRenderer(snapshot, box);
+      sectionRenderer.render(translations, { pending, failed, streaming });
+      for (const status of box.querySelectorAll(':scope > [data-ft-owned="translation-status"]')) status.remove();
       if (failed.size) {
-        const reason = document.createElement('span'); reason.className = 'hnr-translation-failure'; reason.setAttribute('role', 'status');
+        const reason = document.createElement('span'); reason.dataset.ftOwned = 'translation-status'; reason.className = 'hnr-translation-failure'; reason.setAttribute('role', 'status');
         reason.textContent = [...new Set(failureReasons.values())].join('；'); box.append(reason);
       }
       if (entry.kind === 'title' && pending.size === 0 && failed.size === 0) this.tabTitle.update(snapshot.textContent ?? '', box.textContent ?? '');
-      if (failed.size) { const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '翻译失败 · 点击重试'; retry.onclick = () => { for (const index of [...failed]) void run(index, true); }; box.append(retry); }
+      if (failed.size) { const retry = document.createElement('button'); retry.dataset.ftOwned = 'translation-status'; retry.type = 'button'; retry.textContent = '翻译失败 · 点击重试'; retry.onclick = () => { for (const index of [...failed]) void run(index, true); }; box.append(retry); }
     };
     const priority = entry.visible ? 'visible' : manual ? 'interactive' : 'prefetch';
     const run = async (index: number, retry = false): Promise<void> => {
@@ -359,9 +378,8 @@ export class RedditRuntime {
       try {
         const value = await this.service.section(plan.text, entry.owner, entry.visible ? 'visible' : retry ? 'interactive' : priority, controller.signal, partial => {
           if (controller.signal.aborted || !box.isConnected || previews.has(index)) return;
-          const first = !streaming.has(index);
           translations.set(index, partial); streaming.add(index);
-          if (first) render(); else this.service.worker.render(entry.owner, render);
+          this.service.worker.render(entry.owner, render);
         }, { before: '', after: '', post: postContext, index, ...(thread ? { thread } : {}) });
         if (!current()) return;
         previews.delete(index); streaming.delete(index); entry.completed.set(index, value); translations.set(index, value); pending.delete(index);

@@ -4,6 +4,23 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { RedditMediaResize } from '../src/reddit-media-resize';
 
 let resize: RedditMediaResize | undefined;
+
+it('does not scan host media again when translation placeholders and streamed text change', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('GM_getValue', (_key: string, fallback: unknown) => fallback);
+  resize = new RedditMediaResize();
+  await vi.advanceTimersByTimeAsync(300);
+  const scan = vi.spyOn(document, 'querySelectorAll');
+  try {
+    const translation = document.createElement('div'); translation.dataset.ftOwned = 'translation'; document.body.append(translation);
+    translation.innerHTML = '<span class="hnr-translation-placeholder"></span>';
+    await vi.advanceTimersByTimeAsync(300);
+    for (let index = 0; index < 10; index++) translation.textContent = `译文 ${index}`;
+    await vi.advanceTimersByTimeAsync(300);
+    translation.remove(); await vi.advanceTimersByTimeAsync(300);
+    expect(scan).not.toHaveBeenCalled();
+  } finally { scan.mockRestore(); }
+});
 afterEach(() => { resize?.destroy(); resize = undefined; document.body.replaceChildren(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it('sizes media slots without replacing galleries, players, titles or action bars and remembers widths separately', () => {

@@ -2,6 +2,24 @@ import { expect, it, vi } from 'vitest';
 import { TranslationWorkerController } from '../src/translation/worker-controller';
 import { DEFAULTS } from '../src/settings';
 
+it('yields between owners, uses their latest paint and cancels removed owners', async () => {
+  vi.useFakeTimers();
+  const worker = new TranslationWorkerController(DEFAULTS.ai);
+  const first = vi.fn(); const old = vi.fn(); const latest = vi.fn(); const removed = vi.fn();
+  try {
+    worker.render('first', first); worker.render('second', old); worker.render('removed', removed);
+    await vi.advanceTimersByTimeAsync(80);
+    expect(first).toHaveBeenCalledOnce(); expect(old).not.toHaveBeenCalled();
+    worker.render('second', latest); worker.release('removed');
+    await vi.advanceTimersByTimeAsync(16);
+    expect(latest).toHaveBeenCalledOnce(); expect(old).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(removed).not.toHaveBeenCalled(); expect(latest).toHaveBeenCalledOnce();
+    worker.render('destroyed', removed); worker.destroy();
+    await vi.advanceTimersByTimeAsync(200); expect(removed).not.toHaveBeenCalled();
+  } finally { worker.destroy(); vi.useRealTimers(); }
+});
+
 it('promotes visible vocabulary ahead of offscreen words without cancelling active work', async () => {
   const worker = new TranslationWorkerController(DEFAULTS.ai);
   const order: string[] = []; let finish!: () => void;

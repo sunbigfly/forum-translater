@@ -141,18 +141,26 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
   const loadExample = createExampleLoader(service, controller.signal);
   const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl, loadExample));
   let currentWords: VocabularyWord[] = [];
+  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
   const observeTranslations = (): void => {
     if (targets) translationObserver.observe(targets.original, { childList: true, characterData: true, subtree: true });
-    for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true });
+    for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['data-ft-streaming'] });
   };
   const refreshHighlights = (): void => {
     if (!targets || controller.signal.aborted) return;
+    clearTimeout(highlightTimer); highlightTimer = undefined;
     translationObserver.disconnect();
-    highlights.clear();
-    highlights.apply(targets.original, targets.translations, currentWords);
-    observeTranslations();
+    try { highlights.apply(targets.original, targets.translations, currentWords); }
+    finally { observeTranslations(); }
   };
-  const translationObserver = new MutationObserver(refreshHighlights);
+  const translationObserver = new MutationObserver(records => {
+    if (!currentWords.length || controller.signal.aborted) return;
+    if (records.every(record => {
+      const target = record.target instanceof Element ? record.target : record.target.parentElement;
+      return !!target?.closest('[data-ft-owned="translation"][data-ft-streaming]');
+    })) return;
+    highlightTimer ??= setTimeout(refreshHighlights, 120);
+  });
   observeTranslations();
   let running = false;
   let stopCombined: (() => void) | undefined;
@@ -237,7 +245,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
     } finally { running = false; section.removeAttribute('aria-busy'); }
   };
   void Promise.resolve().then(load);
-  return () => { controller.abort(); stopCombined?.(); visibility?.disconnect(); translationObserver.disconnect(); highlights.clear(); stopWordSpeech(shadow); host.remove(); };
+  return () => { controller.abort(); clearTimeout(highlightTimer); stopCombined?.(); visibility?.disconnect(); translationObserver.disconnect(); highlights.clear(); stopWordSpeech(shadow); host.remove(); };
 }
 
 export function renderWordbook(root: HTMLElement): () => void {
