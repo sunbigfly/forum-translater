@@ -5440,8 +5440,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     width = DEFAULT_WIDTH;
     contentListeners = /* @__PURE__ */ new Map();
     fitContent(root) {
-      root.style.removeProperty("--ft-media-fit-width");
       if (document.fullscreenElement || this.kind !== "video" || this.site !== "x") return;
+      root.style.removeProperty("--ft-media-fit-width");
       const player = root.querySelector('[data-testid="videoPlayer"],video');
       if (!player) return;
       const content = player.getBoundingClientRect();
@@ -5514,33 +5514,58 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             this.cancelDrag?.();
             const rect = root.getBoundingClientRect();
             if (!rect.width || !rect.height) return;
-            const startWidth = this.width;
+            const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
+            const previousWidth = root.style.getPropertyValue(this.widthProperty);
+            const previousPriority = root.style.getPropertyPriority(this.widthProperty);
+            const fitWidth = root.style.getPropertyValue("--ft-media-fit-width");
+            let nextWidth = rect.width;
+            let frame;
             const controller = new AbortController();
             controls.setAttribute("data-dragging", "");
+            if (fitWidth) root.style.removeProperty("--ft-media-fit-width");
             const cleanup = () => {
               controller.abort();
+              if (frame !== void 0) cancelAnimationFrame(frame);
+              if (previousWidth) root.style.setProperty(this.widthProperty, previousWidth, previousPriority);
+              else root.style.removeProperty(this.widthProperty);
+              if (fitWidth) root.style.setProperty("--ft-media-fit-width", fitWidth);
               controls.removeAttribute("data-dragging");
               this.cancelDrag = void 0;
             };
             const cancel = () => {
-              this.applyWidth(startWidth);
               cleanup();
             };
             this.cancelDrag = cancel;
             const move = (next) => {
               if (next.pointerId !== event.pointerId) return;
               const delta = edge === "left" ? event.clientX - next.clientX : edge === "right" ? next.clientX - event.clientX : (edge === "top" ? event.clientY - next.clientY : next.clientY - event.clientY) * rect.width / rect.height;
-              this.applyWidth(this.clamp(root, rect.width + delta));
+              nextWidth = this.clampAvailable(available, rect.width + delta);
+              frame ??= requestAnimationFrame(() => {
+                frame = void 0;
+                if (!root.isConnected || !root.contains(controls)) {
+                  cancel();
+                  return;
+                }
+                const value = `${nextWidth}px`;
+                if (root.style.getPropertyValue(this.widthProperty) !== value) root.style.setProperty(this.widthProperty, value);
+              });
             };
             window.addEventListener("pointermove", move, { signal: controller.signal });
             window.addEventListener("pointerup", (next) => {
               if (next.pointerId !== event.pointerId) return;
+              if (!root.isConnected || !root.contains(controls)) {
+                cancel();
+                return;
+              }
               move(next);
-              this.width = Number.parseFloat(document.documentElement.style.getPropertyValue(this.widthProperty));
-              GM_setValue(this.sizeKey, this.width);
+              this.width = nextWidth;
               cleanup();
+              this.applyWidth(this.width);
+              GM_setValue(this.sizeKey, this.width);
             }, { signal: controller.signal });
-            window.addEventListener("pointercancel", cancel, { signal: controller.signal });
+            window.addEventListener("pointercancel", (next) => {
+              if (next.pointerId === event.pointerId) cancel();
+            }, { signal: controller.signal });
             window.addEventListener("blur", cancel, { signal: controller.signal });
             document.addEventListener("fullscreenchange", cancel, { signal: controller.signal });
           };
@@ -5574,6 +5599,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     };
     clamp(root, width) {
       const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
+      return this.clampAvailable(available, width);
+    }
+    clampAvailable(available, width) {
       return Math.max(Math.min(180, available), Math.min(2400, available, width));
     }
     applyWidth(width) {

@@ -7,8 +7,8 @@ export class XVideoResize {
   private contentListeners = new Map<HTMLElement, () => void>();
 
   private fitContent(root: HTMLElement): void {
-    root.style.removeProperty('--ft-media-fit-width');
     if (document.fullscreenElement || this.kind !== 'video' || this.site !== 'x') return;
+    root.style.removeProperty('--ft-media-fit-width');
     const player = root.querySelector<HTMLElement>('[data-testid="videoPlayer"],video');
     if (!player) return;
     const content = player.getBoundingClientRect(); const frame = root.getBoundingClientRect();
@@ -82,24 +82,44 @@ export class XVideoResize {
           event.preventDefault(); event.stopPropagation(); this.cancelDrag?.();
           const rect = root.getBoundingClientRect();
           if (!rect.width || !rect.height) return;
-          const startWidth = this.width;
+          // Measure before writing, then keep pointermove free of layout reads.
+          const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
+          const previousWidth = root.style.getPropertyValue(this.widthProperty);
+          const previousPriority = root.style.getPropertyPriority(this.widthProperty);
+          const fitWidth = root.style.getPropertyValue('--ft-media-fit-width');
+          let nextWidth = rect.width;
+          let frame: number | undefined;
           const controller = new AbortController();
           controls.setAttribute('data-dragging', '');
-          const cleanup = (): void => { controller.abort(); controls.removeAttribute('data-dragging'); this.cancelDrag = undefined; };
-          const cancel = (): void => { this.applyWidth(startWidth); cleanup(); };
+          if (fitWidth) root.style.removeProperty('--ft-media-fit-width');
+          const cleanup = (): void => {
+            controller.abort(); if (frame !== undefined) cancelAnimationFrame(frame);
+            if (previousWidth) root.style.setProperty(this.widthProperty, previousWidth, previousPriority);
+            else root.style.removeProperty(this.widthProperty);
+            if (fitWidth) root.style.setProperty('--ft-media-fit-width', fitWidth);
+            controls.removeAttribute('data-dragging'); this.cancelDrag = undefined;
+          };
+          const cancel = (): void => { cleanup(); };
           this.cancelDrag = cancel;
           const move = (next: PointerEvent): void => {
             if (next.pointerId !== event.pointerId) return;
             const delta = edge === 'left' ? event.clientX - next.clientX : edge === 'right' ? next.clientX - event.clientX : (edge === 'top' ? event.clientY - next.clientY : next.clientY - event.clientY) * rect.width / rect.height;
-            this.applyWidth(this.clamp(root, rect.width + delta));
+            nextWidth = this.clampAvailable(available, rect.width + delta);
+            frame ??= requestAnimationFrame(() => {
+              frame = undefined;
+              if (!root.isConnected || !root.contains(controls)) { cancel(); return; }
+              const value = `${nextWidth}px`;
+              if (root.style.getPropertyValue(this.widthProperty) !== value) root.style.setProperty(this.widthProperty, value);
+            });
           };
           window.addEventListener('pointermove', move, { signal: controller.signal });
           window.addEventListener('pointerup', next => {
             if (next.pointerId !== event.pointerId) return;
-            move(next); this.width = Number.parseFloat(document.documentElement.style.getPropertyValue(this.widthProperty));
-            GM_setValue(this.sizeKey, this.width); cleanup();
+            if (!root.isConnected || !root.contains(controls)) { cancel(); return; }
+            move(next); this.width = nextWidth; cleanup();
+            this.applyWidth(this.width); GM_setValue(this.sizeKey, this.width);
           }, { signal: controller.signal });
-          window.addEventListener('pointercancel', cancel, { signal: controller.signal });
+          window.addEventListener('pointercancel', next => { if (next.pointerId === event.pointerId) cancel(); }, { signal: controller.signal });
           window.addEventListener('blur', cancel, { signal: controller.signal });
           document.addEventListener('fullscreenchange', cancel, { signal: controller.signal });
         };
@@ -127,6 +147,9 @@ export class XVideoResize {
   private refit = (): void => { for (const root of this.roots.keys()) if (root.isConnected) this.fitContent(root); };
   private clamp(root: HTMLElement, width: number): number {
     const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
+    return this.clampAvailable(available, width);
+  }
+  private clampAvailable(available: number, width: number): number {
     return Math.max(Math.min(180, available), Math.min(2400, available, width));
   }
   private applyWidth(width: number): void {

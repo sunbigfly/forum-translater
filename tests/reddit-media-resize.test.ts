@@ -57,3 +57,59 @@ it('observes new posts and replaces preview handles when a lazy video mounts', a
   expect(root?.querySelector('button')).toBeNull();
   expect(root?.hasAttribute('data-ft-reddit-media')).toBe(false);
 });
+
+it('coalesces drag bursts without layout reads or resizing the rest of the feed, then saves the final pointer position', () => {
+  const store = new Map<string, unknown>();
+  vi.stubGlobal('GM_getValue', (_key: string, fallback: unknown) => fallback);
+  vi.stubGlobal('GM_setValue', (key: string, value: unknown) => store.set(key, value));
+  const frames = new Map<number, FrameRequestCallback>(); let frameId = 0;
+  const schedule = vi.fn((callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId; });
+  vi.stubGlobal('requestAnimationFrame', schedule);
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  document.body.innerHTML = '<shreddit-post><div slot="post-media-container" id="photo"><img></div></shreddit-post><shreddit-post><div slot="post-media-container" id="other"><img></div></shreddit-post>';
+  resize = new RedditMediaResize();
+  const root = document.querySelector<HTMLElement>('#photo');
+  const other = document.querySelector<HTMLElement>('#other');
+  if (!root?.parentElement || !other) throw new Error('Missing photos');
+  const measure = vi.fn(() => ({ width: 420, height: 210 } as DOMRect));
+  const available = vi.fn(() => ({ width: 900 } as DOMRect));
+  root.getBoundingClientRect = measure; root.parentElement.getBoundingClientRect = available;
+  const pointer = (type: string, x: number, pointerId = 1): Event => {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.assign(event, { button: 0, pointerId, clientX: x, clientY: 0 }); return event;
+  };
+  const handle = root.querySelector('[data-edge="right"]');
+  handle?.dispatchEvent(pointer('pointerdown', 420));
+  measure.mockClear(); available.mockClear();
+  for (let x = 421; x <= 520; x++) window.dispatchEvent(pointer('pointermove', x));
+  expect(schedule).toHaveBeenCalledTimes(1);
+  expect(measure).not.toHaveBeenCalled(); expect(available).not.toHaveBeenCalled();
+  const flush = (): void => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(0); };
+  flush();
+  expect(root.style.getPropertyValue('--ft-reddit-image-width')).toBe('520px');
+  expect(other.style.getPropertyValue('--ft-reddit-image-width')).toBe('');
+  expect(document.documentElement.style.getPropertyValue('--ft-reddit-image-width')).toBe('420px');
+  expect(store.size).toBe(0);
+  window.dispatchEvent(pointer('pointerup', 560));
+  expect(frames.size).toBe(0);
+  expect(root.style.getPropertyValue('--ft-reddit-image-width')).toBe('');
+  expect(document.documentElement.style.getPropertyValue('--ft-reddit-image-width')).toBe('560px');
+  expect(store.get('ft:reddit-image-width:v1')).toBe(560);
+
+  handle?.dispatchEvent(pointer('pointerdown', 420));
+  window.dispatchEvent(pointer('pointermove', 800));
+  window.dispatchEvent(pointer('pointercancel', 800, 2));
+  expect(frames.size).toBe(1);
+  window.dispatchEvent(pointer('pointercancel', 800));
+  expect(frames.size).toBe(0); flush();
+  expect(root.style.getPropertyValue('--ft-reddit-image-width')).toBe('');
+  expect(document.documentElement.style.getPropertyValue('--ft-reddit-image-width')).toBe('560px');
+  expect(root.querySelector('[data-dragging]')).toBeNull();
+
+  handle?.dispatchEvent(pointer('pointerdown', 420));
+  window.dispatchEvent(pointer('pointermove', 800));
+  root.remove(); flush();
+  expect(root.style.getPropertyValue('--ft-reddit-image-width')).toBe('');
+  expect(root.querySelector('[data-dragging]')).toBeNull();
+  expect(store.get('ft:reddit-image-width:v1')).toBe(560);
+});

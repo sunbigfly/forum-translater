@@ -60,7 +60,7 @@ it('adds four handles, saves a drag, restores its width and removes controls', (
   };
   root.querySelector('[data-edge="right"]')?.dispatchEvent(pointer('pointerdown', 520));
   window.dispatchEvent(pointer('pointermove', 640));
-  expect(document.documentElement.style.getPropertyValue('--ft-x-video-width')).toBe('640px');
+  expect(document.documentElement.style.getPropertyValue('--ft-x-video-width')).toBe('420px');
   expect(store.size).toBe(0);
   window.dispatchEvent(pointer('pointerup', 640));
   expect(store.get('ft:x-video-width:v1')).toBe(640);
