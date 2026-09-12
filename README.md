@@ -3,7 +3,7 @@
   <strong>读懂 Reddit 与 X，顺手积累进阶词汇</strong>
   <br><br>
   <a href="https://greasyfork.org/zh-CN/scripts/594954"><img alt="安装脚本" src="https://img.shields.io/badge/Userscript-安装脚本-536af5"></a>
-  <img alt="版本" src="https://img.shields.io/badge/version-0.2.6-536af5">
+  <img alt="版本" src="https://img.shields.io/badge/version-0.2.7-536af5">
   <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/badge/license-MIT-f5de53"></a>
 </div>
 
@@ -47,6 +47,7 @@
 - 图片与视频默认等比缩放，悬停显示四边手柄，支持拖动和方向键微调。
 - 图片、视频分别记忆尺寸，同类媒体包括引用帖共用设置；联排图片保留横向浏览。
 - 从信息流或帖子详情中打开评论、引用等另一条帖子时，复用 X 原生全屏浮窗和评论区；按 Escape 或原生返回按钮逐条返回。保留后台信息流或直接打开的原帖，连续打开时分别记录返回位置。有额外弹窗、输入焦点或全屏媒体时优先保留原交互；无法识别宿主路由结构时保留普通详情导航。
+- 桌面端与移动端共用返回优化：关闭时保留已有译文，后台页面就绪后立即恢复阅读位置；主动滚动时取消校正。
 
 Reddit 帖子媒体区也支持悬停显示四边手柄、拖动等比缩放和方向键微调。图片与视频分别记忆尺寸，与 X 的尺寸设置相互独立；滚动加载的新帖子自动应用。
 

@@ -41,10 +41,12 @@ export class XLayout {
     this.toggle = toggle;
     this.observer = new MutationObserver(records => {
       if (records.every(isOwnedMutation)) return;
+      this.viewport?.reconcile();
       this.timer ??= setTimeout(() => { this.timer = undefined; this.scan(); }, 150);
     });
     this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid'] });
     document.addEventListener('keydown', this.exitPost, true);
+    window.addEventListener('popstate', this.onRoute);
     this.update(settings);
   }
   update(settings: LayoutSettings): void {
@@ -103,6 +105,7 @@ export class XLayout {
     }
   }
   private restoreIcons(): void { for (const node of this.hidden) node.removeAttribute('data-ft-x-hidden-icon'); this.hidden.clear(); }
+  private onRoute = (): void => { this.viewport?.reconcile(); };
   private exitPost = (event: KeyboardEvent): void => {
     if (event.key !== 'Escape' || event.repeat || event.defaultPrevented || event.isComposing
       || !isXPostPath(location.pathname ?? '') || document.fullscreenElement) return;
@@ -125,6 +128,7 @@ export class XLayout {
     this.ads.destroy();
     this.observer?.disconnect(); clearTimeout(this.timer); this.restoreIcons(); this.toggle?.remove(); this.brand?.remove();
     document.removeEventListener('keydown', this.exitPost, true);
+    window.removeEventListener('popstate', this.onRoute);
     this.logo?.removeAttribute('data-ft-x-native-logo'); this.rail?.removeAttribute('data-ft-x-rail');
     for (const node of this.labels) node.removeAttribute('data-ft-x-nav-label'); this.labels.clear();
     document.documentElement.removeAttribute('data-ft-x-sidebar-collapsed');

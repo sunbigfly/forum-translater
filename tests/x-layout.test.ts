@@ -2,9 +2,25 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { XLayout } from '../src/x-layout';
 import { DEFAULTS, normalizeSettings } from '../src/settings';
+import { XPostViewport } from '../src/x-post-viewport';
+import { XVideoResize } from '../src/x-video-resize';
 let layout: XLayout | undefined;
 beforeEach(() => { vi.stubGlobal('GM_getValue', (_key: string, fallback: unknown) => fallback); vi.stubGlobal('GM_setValue', vi.fn()); });
 afterEach(() => { layout?.destroy(); layout = undefined; vi.unstubAllGlobals(); document.body.replaceChildren(); });
+
+it('reconciles return navigation immediately ahead of the deferred media scan', async () => {
+  vi.useFakeTimers();
+  const route = { hostname: 'x.com', pathname: '/home' }; vi.stubGlobal('location', route);
+  const viewport = vi.spyOn(XPostViewport.prototype, 'reconcile'); const media = vi.spyOn(XVideoResize.prototype, 'reconcile');
+  try {
+    layout = new XLayout(DEFAULTS, vi.fn()); viewport.mockClear(); media.mockClear();
+    route.pathname = '/user/status/123'; window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(viewport).toHaveBeenCalledOnce(); expect(media).not.toHaveBeenCalled();
+    document.body.append(document.createElement('main')); await Promise.resolve();
+    expect(viewport).toHaveBeenCalledTimes(2); expect(media).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(150); expect(media).toHaveBeenCalledTimes(2);
+  } finally { layout?.destroy(); viewport.mockRestore(); media.mockRestore(); vi.useRealTimers(); }
+});
 it('uses the native post back button on Escape and respects editing and dialogs', () => {
   vi.stubGlobal('location', { hostname: 'x.com', pathname: '/someone/status/123' });
   document.body.innerHTML = '<main data-testid="primaryColumn"><button data-testid="app-bar-back">返回</button><input></main>';

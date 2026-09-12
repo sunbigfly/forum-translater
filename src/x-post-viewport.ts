@@ -1,6 +1,7 @@
 import { isXPostPath } from './x-post-modal';
 
 interface ViewportSnapshot { route: string; width: number; anchor: string; top: number; container: HTMLElement | null }
+interface RestoreState { snapshot: ViewportSnapshot; origin: string; applied: boolean; microtaskChecked: boolean }
 const route = (): string => `${location.pathname}${location.search ?? ''}`;
 function postId(article: HTMLElement): string | undefined {
   const timestamp = article.querySelector<HTMLAnchorElement>('a[href*="/status/"]:has(time)');
@@ -12,6 +13,9 @@ function postId(article: HTMLElement): string | undefined {
 export class XPostViewport {
   private snapshots: ViewportSnapshot[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private restoreFrame: number | undefined;
+  private restoreObserver: MutationObserver | undefined;
+  private pendingRestore: RestoreState | undefined;
   private focusTimer: ReturnType<typeof setTimeout> | undefined;
   private currentRoute = route();
   private returningRoute: string | undefined;
@@ -26,6 +30,7 @@ export class XPostViewport {
   private capture = (event: MouseEvent): void => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.defaultPrevented) return;
     const target = event.target instanceof Element ? event.target : null;
+    if (isXPostPath(location.pathname) && target?.closest('[data-testid="app-bar-back"]')) { this.restore(); return; }
     const article = target?.closest<HTMLElement>('article[data-testid="tweet"]');
     if (!article || target?.closest('[data-ft-owned],button,[role="button"],input,textarea,video')) return;
     const link = target?.closest('a');
@@ -40,10 +45,16 @@ export class XPostViewport {
   };
   reconcile(): void {
     const currentRoute = route();
+    this.restoreReady();
     if (currentRoute === this.currentRoute) return;
     this.currentRoute = currentRoute;
     clearTimeout(this.focusTimer); this.focusTimer = undefined;
-    const returning = this.returningRoute === currentRoute;
+    const snapshotIndex = this.snapshots.findIndex(snapshot => snapshot.route === currentRoute);
+    const returning = this.returningRoute === currentRoute || snapshotIndex >= 0;
+    if (snapshotIndex >= 0 && !this.pendingRestore) {
+      const [snapshot] = this.snapshots.splice(snapshotIndex);
+      if (snapshot && snapshot.width === innerWidth) this.beginRestore(snapshot);
+    }
     this.returningRoute = undefined;
     if (returning || !isXPostPath(location.pathname)) return;
     const id = /\/(\d+)\/?$/.exec(location.pathname)?.[1];
@@ -69,38 +80,76 @@ export class XPostViewport {
     this.focusTimer = setTimeout(() => focus(), 0);
   }
   restore(): void {
+    if (this.pendingRestore) return;
     const snapshot = this.snapshots.at(-1);
     if (!snapshot || snapshot.route === route() || snapshot.width !== innerWidth) return;
-    this.cancel(); this.snapshots.pop();
+    this.snapshots.pop();
+    this.beginRestore(snapshot);
+  }
+  private beginRestore(snapshot: ViewportSnapshot): void {
+    this.cancel();
     this.returningRoute = snapshot.route;
-    const deadline = Date.now() + 2000;
-    const findAnchor = (): HTMLElement | undefined => [...(snapshot.container?.isConnected ? snapshot.container : document).querySelectorAll<HTMLElement>('[data-testid="primaryColumn"] article[data-testid="tweet"]')]
-      .find(node => postId(node) === snapshot.anchor);
-    const waitForFeed = (): void => {
-      if (innerWidth !== snapshot.width || Date.now() >= deadline) { this.cancel(); return; }
-      if (route() !== snapshot.route || !findAnchor()) {
-        this.timer = setTimeout(waitForFeed, 100); return;
+    this.pendingRestore = { snapshot, origin: route(), applied: false, microtaskChecked: false };
+    this.restoreObserver = new MutationObserver(() => this.restoreReady());
+    this.restoreObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-hidden', 'hidden', 'style', 'data-ft-x-native-post'] });
+    this.timer = setTimeout(this.cancel, 2000);
+    this.restoreReady();
+    if (this.pendingRestore && this.restoreFrame === undefined) {
+      this.restoreFrame = requestAnimationFrame(() => { this.restoreFrame = undefined; this.restoreReady(); });
+    }
+  }
+  private restoreReady(): void {
+    const pending = this.pendingRestore;
+    if (!pending) return;
+    if (innerWidth !== pending.snapshot.width || (route() !== pending.origin && route() !== pending.snapshot.route)) { this.cancel(); return; }
+    if (pending.applied || route() !== pending.snapshot.route || !this.correctOffset(pending.snapshot)) return;
+    pending.applied = true;
+    if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = undefined;
+    if (pending.microtaskChecked) { this.finishRestore(pending); return; }
+    pending.microtaskChecked = true;
+    // Recheck this native DOM batch without waiting for a potentially throttled frame.
+    queueMicrotask(() => {
+      if (this.pendingRestore !== pending) return;
+      if (route() !== pending.snapshot.route || innerWidth !== pending.snapshot.width) { this.cancel(); return; }
+      if (!this.correctOffset(pending.snapshot)) {
+        pending.applied = false;
+        this.restoreFrame = requestAnimationFrame(() => { this.restoreFrame = undefined; this.restoreReady(); });
+        return;
       }
-      // Allow native route restoration and our media scan to finish before one correction.
-      this.timer = setTimeout(() => {
-        this.timer = undefined;
-        if (route() !== snapshot.route || innerWidth !== snapshot.width) return;
-        const anchor = findAnchor();
-        if (!anchor) return;
-        const rect = anchor.getBoundingClientRect();
-        if (rect.height <= 0) return;
-        const delta = rect.top - snapshot.top;
-        if (Math.abs(delta) > 1) {
-          const container = anchor.closest<HTMLElement>('[data-ft-x-native-post]');
-          if (container) container.scrollTo({ top: Math.max(0, container.scrollTop + delta), left: container.scrollLeft, behavior: 'instant' });
-          else window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: 'instant' });
-        }
-      }, 200);
-    };
-    this.timer = setTimeout(waitForFeed, 0);
+      this.finishRestore(pending);
+    });
+  }
+  private finishRestore(pending: RestoreState): void {
+    this.restoreObserver?.disconnect();
+    // Keep one final frame check for a later native layout or scroll restoration.
+    this.restoreFrame = requestAnimationFrame(() => {
+      this.restoreFrame = undefined;
+      if (this.pendingRestore !== pending) return;
+      if (route() === pending.snapshot.route && innerWidth === pending.snapshot.width) this.correctOffset(pending.snapshot);
+      this.cancel();
+    });
+  }
+  private correctOffset(snapshot: ViewportSnapshot): boolean {
+    const anchor = [...(snapshot.container?.isConnected ? snapshot.container : document).querySelectorAll<HTMLElement>('[data-testid="primaryColumn"] article[data-testid="tweet"]')]
+      .find(node => postId(node) === snapshot.anchor && !node.closest('[aria-hidden="true"],[hidden]'));
+    if (!anchor) return false;
+    const rect = anchor.getBoundingClientRect();
+    if (rect.height <= 0) return false;
+    const delta = rect.top - snapshot.top;
+    if (Math.abs(delta) > 1) {
+      const container = anchor.closest<HTMLElement>('[data-ft-x-native-post]');
+      if (container) container.scrollTo({ top: Math.max(0, container.scrollTop + delta), left: container.scrollLeft, behavior: 'instant' });
+      else window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: 'instant' });
+      const corrected = anchor.getBoundingClientRect();
+      return corrected.height > 0 && Math.abs(corrected.top - snapshot.top) <= 1;
+    }
+    return true;
   }
   private cancel = (): void => {
     clearTimeout(this.timer); this.timer = undefined;
+    if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame); this.restoreFrame = undefined;
+    this.restoreObserver?.disconnect(); this.restoreObserver = undefined; this.pendingRestore = undefined;
     clearTimeout(this.focusTimer); this.focusTimer = undefined;
   };
 

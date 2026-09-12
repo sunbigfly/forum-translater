@@ -20,13 +20,14 @@ it('restores the same post offset once without changing row height or chasing la
   path.pathname = '/home'; y = 0; const returned = article(900, 60); returned.style.minHeight = '12px';
   const measure = vi.spyOn(returned, 'getBoundingClientRect');
   await vi.advanceTimersByTimeAsync(300); expect(y).toBe(880); expect(returned.style.minHeight).toBe('12px');
-  expect(measure).toHaveBeenCalledTimes(1); expect(scroll).toHaveBeenCalledTimes(1);
-  y = 100; await vi.advanceTimersByTimeAsync(5000); expect(y).toBe(100); expect(measure).toHaveBeenCalledTimes(1);
+  const completedMeasurements = measure.mock.calls.length;
+  expect(completedMeasurements).toBeLessThanOrEqual(4); expect(scroll).toHaveBeenCalledTimes(1);
+  y = 100; await vi.advanceTimersByTimeAsync(5000); expect(y).toBe(100); expect(measure).toHaveBeenCalledTimes(completedMeasurements);
 });
 it('cancels the pending correction as soon as the user scrolls', async () => {
-  enter(); view.restore(); path.pathname = '/home'; article(900, 60);
-  await vi.advanceTimersByTimeAsync(100); window.dispatchEvent(new WheelEvent('wheel'));
-  y = 100; await vi.advanceTimersByTimeAsync(5000); expect(scroll).not.toHaveBeenCalled();
+  enter(); view.reconcile(); view.restore(); window.dispatchEvent(new WheelEvent('wheel'));
+  path.pathname = '/home'; article(900, 60); view.reconcile();
+  y = 100; await vi.advanceTimersByTimeAsync(5000); expect(scroll).not.toHaveBeenCalled(); expect(y).toBe(100);
 });
 it('does not jump to an old scroll coordinate while the original post is missing', async () => {
   enter(); view.restore(); path.pathname = '/home'; document.body.replaceChildren(); y = 0;
@@ -45,13 +46,111 @@ it('expires without modifying the page if the feed never returns', async () => {
   expect(scroll).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
 });
 
-it('restores nested Post scrolling inside the modal and retains the feed snapshot for the next return', async () => {
+it('restores as soon as the route is ready and corrects native restoration on the next frame', async () => {
+  enter(); view.reconcile(); view.restore(); path.pathname = '/home'; y = 0; article(900, 60);
+  view.reconcile(); expect(y).toBe(880); expect(scroll).toHaveBeenCalledOnce();
+  await Promise.resolve();
+  y = 200; await vi.advanceTimersByTimeAsync(20);
+  expect(y).toBe(880); expect(scroll).toHaveBeenCalledTimes(2); expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([390, 1280])('waits for an ineffective native scroll lock to release at %i px without polling', async width => {
+  vi.stubGlobal('innerWidth', width);
+  enter(); view.restore(); path.pathname = '/home'; y = 0; const returned = article(900, 60);
+  let locked = true; scroll.mockImplementation((options: ScrollToOptions) => { if (!locked) y = options.top ?? y; });
+  view.reconcile(); expect(y).toBe(0);
+  await vi.advanceTimersByTimeAsync(32); const lockedAttempts = scroll.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(400); expect(scroll).toHaveBeenCalledTimes(lockedAttempts); expect(y).toBe(0);
+  locked = false; returned.parentElement?.style.setProperty('overflow', 'visible');
+  await vi.advanceTimersByTimeAsync(0); expect(y).toBe(880);
+  await vi.advanceTimersByTimeAsync(20); expect(scroll).toHaveBeenCalledTimes(lockedAttempts + 1); expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([390, 1280])('corrects a native overwrite in the same DOM batch at %i px without waiting for a frame', async width => {
+  vi.stubGlobal('innerWidth', width);
+  enter(); view.restore(); path.pathname = '/home'; y = 0; const returned = article(900, 60);
+  const measure = vi.spyOn(returned, 'getBoundingClientRect'); view.reconcile(); expect(y).toBe(880);
+  y = 200; await Promise.resolve(); expect(y).toBe(880); expect(scroll).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(20); const completedMeasurements = measure.mock.calls.length;
+  expect(completedMeasurements).toBeLessThanOrEqual(5);
+  y = 100; await vi.advanceTimersByTimeAsync(2500); expect(y).toBe(100); expect(measure).toHaveBeenCalledTimes(completedMeasurements);
+});
+
+it.each([390, 1280])('cancels the queued same-batch correction at %i px when the user takes control', async width => {
+  vi.stubGlobal('innerWidth', width);
+  enter(); view.restore(); path.pathname = '/home'; y = 0; article(900, 60); view.reconcile();
+  window.dispatchEvent(new Event('pointerdown')); y = 200; view.reconcile();
+  await Promise.resolve(); expect(y).toBe(200);
+  await vi.advanceTimersByTimeAsync(2500); expect(y).toBe(200); expect(scroll).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it('does not override user scrolling during the final native-restoration frame', async () => {
+  enter(); view.restore(); path.pathname = '/home'; y = 0; article(900, 60); view.reconcile();
+  expect(y).toBe(880); window.dispatchEvent(new Event('touchstart')); y = 200;
+  view.reconcile(); await vi.advanceTimersByTimeAsync(2500);
+  expect(y).toBe(200); expect(scroll).toHaveBeenCalledOnce();
+});
+
+it('waits without polling and restores when the background becomes visible', async () => {
+  enter(); view.restore(); path.pathname = '/home'; y = 0; document.body.replaceChildren();
+  const queries = vi.spyOn(document, 'querySelectorAll');
+  view.reconcile(); await vi.advanceTimersByTimeAsync(32); const waitingQueries = queries.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(1000); expect(queries).toHaveBeenCalledTimes(waitingQueries);
+  const returned = article(900, 60); returned.parentElement?.setAttribute('aria-hidden', 'true');
+  await vi.advanceTimersByTimeAsync(0); expect(scroll).not.toHaveBeenCalled();
+  returned.parentElement?.removeAttribute('aria-hidden'); await vi.advanceTimersByTimeAsync(0);
+  expect(y).toBe(880); expect(scroll).toHaveBeenCalledOnce();
+});
+
+it('finds the visible return anchor when a hidden retained surface has the same Post', () => {
+  enter(); view.restore(); path.pathname = '/home'; y = 0;
+  const hidden = article(900, 60).parentElement; if (!hidden) throw new Error('Missing primary');
+  hidden.setAttribute('aria-hidden', 'true'); hidden.remove();
+  article(1000, 60); document.body.prepend(hidden); view.reconcile();
+  expect(y).toBe(980); expect(scroll).toHaveBeenCalledOnce();
+});
+
+it.each([390, 1280])('restores on native back clicks at %i px without consuming the parent snapshot twice', async width => {
+  vi.stubGlobal('innerWidth', width);
+  enter(); const nested = article(540, 180); nested.querySelector('span')?.click(); path.pathname = '/person/status/456';
+  const back = document.createElement('button'); back.dataset.testid = 'app-bar-back'; document.body.append(back);
+  view.restore(); back.click(); path.pathname = '/person/status/123'; y = 0; article(900, 60); view.reconcile();
+  expect(y).toBe(860); await vi.advanceTimersByTimeAsync(20);
+  const parentBack = document.createElement('button'); parentBack.dataset.testid = 'app-bar-back'; document.body.append(parentBack);
+  parentBack.click(); path.pathname = '/home'; y = 0; article(1000, 60); view.reconcile();
+  expect(y).toBe(980);
+});
+
+it('restores a browser-history return and abandons a pending return to another route', async () => {
+  enter(); view.reconcile(); path.pathname = '/home'; y = 0; article(900, 60); view.reconcile();
+  expect(y).toBe(880); await vi.advanceTimersByTimeAsync(20);
+  enter(); view.reconcile(); view.restore(); path.pathname = '/notifications'; view.reconcile();
+  path.pathname = '/home'; y = 0; article(900, 60); view.reconcile(); await vi.advanceTimersByTimeAsync(2500);
+  expect(y).toBe(0); expect(scroll).toHaveBeenCalledOnce();
+});
+
+it('cancels restoration if the viewport width changes before the route is ready', async () => {
+  enter(); view.restore(); vi.stubGlobal('innerWidth', innerWidth + 100);
+  path.pathname = '/home'; y = 0; article(900, 60); view.reconcile(); await vi.advanceTimersByTimeAsync(2500);
+  expect(y).toBe(0); expect(scroll).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([390, 1280])('restores nested Post scrolling at %i px inside the modal and retains the feed snapshot for the next return', async width => {
+  vi.stubGlobal('innerWidth', width);
   enter();
   const nested = article(540, 180);
   const surface = document.createElement('div'); surface.setAttribute('data-ft-x-native-post', '');
   const primary = nested.parentElement; if (!primary) throw new Error('Missing primary');
   surface.append(primary); document.body.append(surface);
-  const scrollModal = vi.fn(); surface.scrollTop = 300; surface.scrollTo = scrollModal;
+  const measureNested = nested.getBoundingClientRect.bind(nested);
+  nested.getBoundingClientRect = () => {
+    const rect = measureNested(); const top = rect.top + 300 - surface.scrollTop;
+    return { top, bottom: top + rect.height, height: rect.height, left: rect.left, right: rect.right, width: rect.width, x: rect.x, y: top, toJSON: () => ({}) };
+  };
+  const scrollModal = vi.fn((options?: ScrollToOptions | number, coordinateY?: number) => {
+    surface.scrollTop = typeof options === 'number' ? coordinateY ?? surface.scrollTop : options?.top ?? surface.scrollTop;
+  });
+  surface.scrollTop = 300; surface.scrollTo = scrollModal;
   nested.querySelector('span')?.click(); path.pathname = '/person/status/456';
   view.restore(); path.pathname = '/person/status/123'; y = 480;
   await vi.advanceTimersByTimeAsync(400);

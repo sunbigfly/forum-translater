@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.6
+// @version      0.2.7
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -4085,15 +4085,14 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           for (const node2 of record3.addedNodes) if (node2 instanceof Element && !node2.matches(OWNED)) this.roots.add(node2);
         }
         relevant = true;
-        const changed = record3.type === "childList" ? [...record3.addedNodes, ...record3.removedNodes] : null;
-        for (const entry of this.entries.values()) {
-          const changedOwner = !changed || changed.some((node2) => node2.contains(entry.element));
-          if (entry.element.contains(target) || target.contains(entry.element) && changedOwner) {
-            entry.sourceSignature = null;
-            this.roots.add(entry.element);
-          }
+        let owner;
+        for (let node2 = target; node2 && !owner; node2 = node2.parentElement) {
+          if (node2 instanceof HTMLElement) owner = this.entries.get(node2);
         }
-        if (record3.type !== "childList") this.roots.add(target);
+        if (owner) {
+          if (record3.type !== "attributes" || !["class", "style", "collapsed", "open", "aria-expanded"].includes(record3.attributeName ?? "")) owner.sourceSignature = null;
+          this.roots.add(owner.element);
+        } else if (record3.type !== "childList") this.roots.add(target);
       }
       if (relevant) this.schedule();
     }
@@ -4150,6 +4149,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.longPosts.reconcile();
       this.feed.reconcile();
       if (this.route !== location.href) {
+        const nativePostNavigation = isXSite() && document.documentElement.hasAttribute("data-ft-x-post-layout") && (isXPostPath(new URL(this.route, location.href).pathname) || isXPostPath(location.pathname ?? ""));
         this.tabTitle.reset();
         this.route = location.href;
         this.translationOnly = loadTranslationOnly();
@@ -4157,8 +4157,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           for (const entry of this.entries.values()) this.remove(entry);
           this.service.resetPending();
         }
-        this.roots.clear();
-        this.roots.add(document);
+        if (!nativePostNavigation) {
+          this.roots.clear();
+          this.roots.add(document);
+        }
       }
       for (const entry of this.entries.values()) {
         if (entry.element.isConnected) {
@@ -4182,6 +4184,14 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           if (isXPostBackground(candidate.element)) continue;
           const { kind } = candidate;
           if (!this.settings[kind]) continue;
+          const known = this.entries.get(candidate.element);
+          if (known && known.sourceSignature === known.signature && known.identity === contentIdentity(candidate.element) && !/^zh(?:-|$)/i.test(candidate.element.lang) && (known.state !== "done" || known.box?.isConnected)) {
+            if (known.state !== "done") {
+              if (isReadable(known.element)) this.start(known);
+              else this.cancel(known);
+            }
+            continue;
+          }
           const element = this.longPosts.prepare(candidate.element);
           const snapshot = sourceSnapshot(element);
           const signature = snapshot.innerHTML;
@@ -4195,8 +4205,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           if (this.entries.has(element)) {
             const current = this.entries.get(element);
             if (current) {
-              if (isReadable(element)) this.start(current);
-              else this.cancel(current);
+              current.sourceSignature = signature;
+              if (current.state !== "done") {
+                if (isReadable(element)) this.start(current);
+                else this.cancel(current);
+              }
             }
             continue;
           }
@@ -4253,8 +4266,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.service.release(entry.owner);
     }
     start(entry, manual = false) {
-      if (this.destroyed || !isReadable(entry.element) || !entry.near && !entry.visible && !manual) return;
-      if (entry.state !== "idle" && !(manual && entry.state === "error")) return;
+      if (this.destroyed || entry.state !== "idle" && !(manual && entry.state === "error")) return;
+      if (!isReadable(entry.element) || !entry.near && !entry.visible && !manual) return;
       const controller = new AbortController();
       entry.controller = controller;
       entry.state = "loading";
@@ -5350,6 +5363,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
   var XPostViewport = class {
     snapshots = [];
     timer;
+    restoreFrame;
+    restoreObserver;
+    pendingRestore;
     focusTimer;
     currentRoute = route();
     returningRoute;
@@ -5364,6 +5380,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     capture = (event) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.defaultPrevented) return;
       const target = event.target instanceof Element ? event.target : null;
+      if (isXPostPath(location.pathname) && target?.closest('[data-testid="app-bar-back"]')) {
+        this.restore();
+        return;
+      }
       const article = target?.closest('article[data-testid="tweet"]');
       if (!article || target?.closest('[data-ft-owned],button,[role="button"],input,textarea,video')) return;
       const link2 = target?.closest("a");
@@ -5380,11 +5400,17 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     };
     reconcile() {
       const currentRoute = route();
+      this.restoreReady();
       if (currentRoute === this.currentRoute) return;
       this.currentRoute = currentRoute;
       clearTimeout(this.focusTimer);
       this.focusTimer = void 0;
-      const returning = this.returningRoute === currentRoute;
+      const snapshotIndex = this.snapshots.findIndex((snapshot) => snapshot.route === currentRoute);
+      const returning = this.returningRoute === currentRoute || snapshotIndex >= 0;
+      if (snapshotIndex >= 0 && !this.pendingRestore) {
+        const [snapshot] = this.snapshots.splice(snapshotIndex);
+        if (snapshot && snapshot.width === innerWidth) this.beginRestore(snapshot);
+      }
       this.returningRoute = void 0;
       if (returning || !isXPostPath(location.pathname)) return;
       const id = /\/(\d+)\/?$/.exec(location.pathname)?.[1];
@@ -5413,42 +5439,92 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.focusTimer = setTimeout(() => focus(), 0);
     }
     restore() {
+      if (this.pendingRestore) return;
       const snapshot = this.snapshots.at(-1);
       if (!snapshot || snapshot.route === route() || snapshot.width !== innerWidth) return;
-      this.cancel();
       this.snapshots.pop();
+      this.beginRestore(snapshot);
+    }
+    beginRestore(snapshot) {
+      this.cancel();
       this.returningRoute = snapshot.route;
-      const deadline = Date.now() + 2e3;
-      const findAnchor = () => [...(snapshot.container?.isConnected ? snapshot.container : document).querySelectorAll('[data-testid="primaryColumn"] article[data-testid="tweet"]')].find((node2) => postId(node2) === snapshot.anchor);
-      const waitForFeed = () => {
-        if (innerWidth !== snapshot.width || Date.now() >= deadline) {
+      this.pendingRestore = { snapshot, origin: route(), applied: false, microtaskChecked: false };
+      this.restoreObserver = new MutationObserver(() => this.restoreReady());
+      this.restoreObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-hidden", "hidden", "style", "data-ft-x-native-post"] });
+      this.timer = setTimeout(this.cancel, 2e3);
+      this.restoreReady();
+      if (this.pendingRestore && this.restoreFrame === void 0) {
+        this.restoreFrame = requestAnimationFrame(() => {
+          this.restoreFrame = void 0;
+          this.restoreReady();
+        });
+      }
+    }
+    restoreReady() {
+      const pending = this.pendingRestore;
+      if (!pending) return;
+      if (innerWidth !== pending.snapshot.width || route() !== pending.origin && route() !== pending.snapshot.route) {
+        this.cancel();
+        return;
+      }
+      if (pending.applied || route() !== pending.snapshot.route || !this.correctOffset(pending.snapshot)) return;
+      pending.applied = true;
+      if (this.restoreFrame !== void 0) cancelAnimationFrame(this.restoreFrame);
+      this.restoreFrame = void 0;
+      if (pending.microtaskChecked) {
+        this.finishRestore(pending);
+        return;
+      }
+      pending.microtaskChecked = true;
+      queueMicrotask(() => {
+        if (this.pendingRestore !== pending) return;
+        if (route() !== pending.snapshot.route || innerWidth !== pending.snapshot.width) {
           this.cancel();
           return;
         }
-        if (route() !== snapshot.route || !findAnchor()) {
-          this.timer = setTimeout(waitForFeed, 100);
+        if (!this.correctOffset(pending.snapshot)) {
+          pending.applied = false;
+          this.restoreFrame = requestAnimationFrame(() => {
+            this.restoreFrame = void 0;
+            this.restoreReady();
+          });
           return;
         }
-        this.timer = setTimeout(() => {
-          this.timer = void 0;
-          if (route() !== snapshot.route || innerWidth !== snapshot.width) return;
-          const anchor = findAnchor();
-          if (!anchor) return;
-          const rect = anchor.getBoundingClientRect();
-          if (rect.height <= 0) return;
-          const delta = rect.top - snapshot.top;
-          if (Math.abs(delta) > 1) {
-            const container = anchor.closest("[data-ft-x-native-post]");
-            if (container) container.scrollTo({ top: Math.max(0, container.scrollTop + delta), left: container.scrollLeft, behavior: "instant" });
-            else window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: "instant" });
-          }
-        }, 200);
-      };
-      this.timer = setTimeout(waitForFeed, 0);
+        this.finishRestore(pending);
+      });
+    }
+    finishRestore(pending) {
+      this.restoreObserver?.disconnect();
+      this.restoreFrame = requestAnimationFrame(() => {
+        this.restoreFrame = void 0;
+        if (this.pendingRestore !== pending) return;
+        if (route() === pending.snapshot.route && innerWidth === pending.snapshot.width) this.correctOffset(pending.snapshot);
+        this.cancel();
+      });
+    }
+    correctOffset(snapshot) {
+      const anchor = [...(snapshot.container?.isConnected ? snapshot.container : document).querySelectorAll('[data-testid="primaryColumn"] article[data-testid="tweet"]')].find((node2) => postId(node2) === snapshot.anchor && !node2.closest('[aria-hidden="true"],[hidden]'));
+      if (!anchor) return false;
+      const rect = anchor.getBoundingClientRect();
+      if (rect.height <= 0) return false;
+      const delta = rect.top - snapshot.top;
+      if (Math.abs(delta) > 1) {
+        const container = anchor.closest("[data-ft-x-native-post]");
+        if (container) container.scrollTo({ top: Math.max(0, container.scrollTop + delta), left: container.scrollLeft, behavior: "instant" });
+        else window.scrollTo({ top: Math.max(0, scrollY + delta), left: scrollX, behavior: "instant" });
+        const corrected = anchor.getBoundingClientRect();
+        return corrected.height > 0 && Math.abs(corrected.top - snapshot.top) <= 1;
+      }
+      return true;
     }
     cancel = () => {
       clearTimeout(this.timer);
       this.timer = void 0;
+      if (this.restoreFrame !== void 0) cancelAnimationFrame(this.restoreFrame);
+      this.restoreFrame = void 0;
+      this.restoreObserver?.disconnect();
+      this.restoreObserver = void 0;
+      this.pendingRestore = void 0;
       clearTimeout(this.focusTimer);
       this.focusTimer = void 0;
     };
@@ -5743,6 +5819,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.toggle = toggle;
       this.observer = new MutationObserver((records) => {
         if (records.every(isOwnedMutation)) return;
+        this.viewport?.reconcile();
         this.timer ??= setTimeout(() => {
           this.timer = void 0;
           this.scan();
@@ -5750,6 +5827,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       });
       this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "data-testid"] });
       document.addEventListener("keydown", this.exitPost, true);
+      window.addEventListener("popstate", this.onRoute);
       this.update(settings);
     }
     viewport;
@@ -5834,6 +5912,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       for (const node2 of this.hidden) node2.removeAttribute("data-ft-x-hidden-icon");
       this.hidden.clear();
     }
+    onRoute = () => {
+      this.viewport?.reconcile();
+    };
     exitPost = (event) => {
       if (event.key !== "Escape" || event.repeat || event.defaultPrevented || event.isComposing || !isXPostPath(location.pathname ?? "") || document.fullscreenElement) return;
       const post = document.querySelector("[data-ft-x-native-post]");
@@ -5858,6 +5939,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.toggle?.remove();
       this.brand?.remove();
       document.removeEventListener("keydown", this.exitPost, true);
+      window.removeEventListener("popstate", this.onRoute);
       this.logo?.removeAttribute("data-ft-x-native-logo");
       this.rail?.removeAttribute("data-ft-x-rail");
       for (const node2 of this.labels) node2.removeAttribute("data-ft-x-nav-label");

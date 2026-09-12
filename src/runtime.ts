@@ -2,7 +2,7 @@ import { redditContext } from './reddit-context';
 import { mountVocabulary } from './vocabulary-ui';
 import { xParagraphs } from './x-paragraphs';
 import { XLongPosts } from './x-long-posts';
-import { isXPostBackground, isXPostBackgroundRoute } from './x-post-modal';
+import { isXPostBackground, isXPostBackgroundRoute, isXPostPath } from './x-post-modal';
 import { FeedDeduplicator } from './feed-deduplicator';
 import { TabTitle } from './tab-title';
 import { contentIdentity, discover, isReadable, OWNED, sourceSnapshot } from './reddit';
@@ -82,15 +82,14 @@ export class RedditRuntime {
         for (const node of record.addedNodes) if (node instanceof Element && !node.matches(OWNED)) this.roots.add(node);
       }
       relevant = true;
-      const changed = record.type === 'childList' ? [...record.addedNodes, ...record.removedNodes] : null;
-      for (const entry of this.entries.values()) {
-        const changedOwner = !changed || changed.some(node => node.contains(entry.element));
-        if (entry.element.contains(target) || target.contains(entry.element) && changedOwner) {
-          entry.sourceSignature = null;
-          this.roots.add(entry.element);
-        }
+      let owner: Entry | undefined;
+      for (let node: Element | null = target; node && !owner; node = node.parentElement) {
+        if (node instanceof HTMLElement) owner = this.entries.get(node);
       }
-      if (record.type !== 'childList') this.roots.add(target);
+      if (owner) {
+        if (record.type !== 'attributes' || !['class', 'style', 'collapsed', 'open', 'aria-expanded'].includes(record.attributeName ?? '')) owner.sourceSignature = null;
+        this.roots.add(owner.element);
+      } else if (record.type !== 'childList') this.roots.add(target);
     }
     if (relevant) this.schedule();
   }
@@ -135,6 +134,8 @@ export class RedditRuntime {
     this.longPosts.reconcile();
     this.feed.reconcile();
     if (this.route !== location.href) {
+      const nativePostNavigation = isXSite() && document.documentElement.hasAttribute('data-ft-x-post-layout')
+        && (isXPostPath(new URL(this.route, location.href).pathname) || isXPostPath(location.pathname ?? ''));
       this.tabTitle.reset();
       this.route = location.href; this.translationOnly = loadTranslationOnly();
       // X may keep the feed tree while showing a Post. Do not tear down its
@@ -143,7 +144,9 @@ export class RedditRuntime {
         for (const entry of this.entries.values()) this.remove(entry);
         this.service.resetPending();
       }
-      this.roots.clear(); this.roots.add(document);
+      // Native Post navigation retains the background. Mutation roots already
+      // identify new/changed content; route-only returns need no full rescan.
+      if (!nativePostNavigation) { this.roots.clear(); this.roots.add(document); }
     }
     for (const entry of this.entries.values()) {
       if (entry.element.isConnected) { this.detached.delete(entry); continue; }
@@ -164,6 +167,12 @@ export class RedditRuntime {
         if (isXPostBackground(candidate.element)) continue;
         const { kind } = candidate;
         if (!this.settings[kind]) continue;
+        const known = this.entries.get(candidate.element);
+        if (known && known.sourceSignature === known.signature && known.identity === contentIdentity(candidate.element)
+          && !/^zh(?:-|$)/i.test(candidate.element.lang) && (known.state !== 'done' || known.box?.isConnected)) {
+          if (known.state !== 'done') { if (isReadable(known.element)) this.start(known); else this.cancel(known); }
+          continue;
+        }
         const element = this.longPosts.prepare(candidate.element);
         const snapshot = sourceSnapshot(element);
         const signature = snapshot.innerHTML;
@@ -173,7 +182,10 @@ export class RedditRuntime {
         if (existing && (existing.signature !== signature || existing.identity !== identity || !existing.box?.isConnected && existing.state === 'done')) this.remove(existing);
         if (this.entries.has(element)) {
           const current = this.entries.get(element);
-          if (current) { if (isReadable(element)) this.start(current); else this.cancel(current); }
+          if (current) {
+            current.sourceSignature = signature;
+            if (current.state !== 'done') { if (isReadable(element)) this.start(current); else this.cancel(current); }
+          }
           continue;
         }
         if (!translationSectionPlans(snapshot).some(plan => translationBlockNeedsTranslation(plan.text, true))) continue;
@@ -206,8 +218,8 @@ export class RedditRuntime {
     this.service.release(entry.owner);
   }
   private start(entry: Entry, manual = false): void {
-    if (this.destroyed || !isReadable(entry.element) || (!entry.near && !entry.visible && !manual)) return;
-    if (entry.state !== 'idle' && !(manual && entry.state === 'error')) return;
+    if (this.destroyed || entry.state !== 'idle' && !(manual && entry.state === 'error')) return;
+    if (!isReadable(entry.element) || (!entry.near && !entry.visible && !manual)) return;
     const controller = new AbortController(); entry.controller = controller; entry.state = 'loading';
     const origins = new Map<Node, HTMLElement>();
     const x = xParagraphs(entry.element);

@@ -33,6 +33,34 @@ afterEach(() => { runtime?.destroy(); runtime = undefined; service.destroy(); vi
 function title(): HTMLElement { const element = document.querySelector<HTMLElement>('a[slot="title"]'); if (!element) throw new Error('Missing fixture'); return element; }
 async function settle(): Promise<void> { await vi.advanceTimersByTimeAsync(150); }
 
+it.each([330, 1280])('returns from native Posts at %i px without cloning the retained feed or rescanning the document', async width => {
+  const route = { hostname: 'x.com', href: 'https://x.com/home', pathname: '/home' };
+  vi.stubGlobal('location', route); vi.stubGlobal('innerWidth', width);
+  document.body.innerHTML = '<main data-testid="primaryColumn" data-ft-x-post-background="/home"><article data-testid="tweet"><a href="/user/status/123"><time>Now</time></a><div data-testid="tweetText">Retained feed paragraph</div></article></main>';
+  const feed = document.querySelector('main'); const root = feed?.querySelector('[data-testid="tweetText"]');
+  if (!feed || !root) throw new Error('Missing feed');
+  const translate = vi.spyOn(service, 'section').mockResolvedValue('已有译文');
+  runtime = new RedditRuntime({ ...service.settings, vocabulary: false }, service); Observer.instances[0]?.emit(root); await settle();
+  const box = feed.querySelector('[data-ft-owned="translation"]'); const discovery = vi.spyOn(reddit, 'discover'); const snapshots = vi.spyOn(reddit, 'sourceSnapshot');
+  document.documentElement.setAttribute('data-ft-x-post-layout', '');
+  try {
+    route.href = 'https://x.com/user/status/456'; route.pathname = '/user/status/456'; feed.setAttribute('aria-hidden', 'true');
+    const post = document.createElement('div'); post.setAttribute('role', 'dialog'); post.setAttribute('data-ft-x-native-post', '');
+    post.innerHTML = '<main data-testid="primaryColumn"><article data-testid="tweet"><a href="/user/status/456"><time>Now</time></a><div data-testid="tweetText">New Post paragraph</div></article></main>';
+    document.body.append(post); window.dispatchEvent(new PopStateEvent('popstate')); await settle();
+    const opened = post.querySelector('[data-testid="tweetText"]'); if (!opened) throw new Error('Missing Post');
+    Observer.instances[0]?.emit(opened); await settle();
+    route.href = 'https://x.com/home'; route.pathname = '/home'; post.remove(); feed.removeAttribute('aria-hidden');
+    window.dispatchEvent(new PopStateEvent('popstate')); await settle();
+    expect(discovery.mock.calls.some(([scope]) => scope === document)).toBe(false);
+    expect(snapshots.mock.calls.filter(([source]) => source === root)).toHaveLength(0);
+    expect(feed.querySelector('[data-ft-owned="translation"]')).toBe(box); expect(translate).toHaveBeenCalledTimes(2);
+    const reads = vi.spyOn(HTMLElement.prototype, 'getClientRects'); reads.mockClear();
+    Observer.instances[0]?.emit(root); Observer.instances[1]?.emit(root);
+    expect(reads).not.toHaveBeenCalled();
+  } finally { document.documentElement.removeAttribute('data-ft-x-post-layout'); }
+});
+
 it('reuses the source snapshot and section nodes while streaming, then rejects changed host content', async () => {
   let partial: ((value: string) => void) | undefined; let finish: ((value: string) => void) | undefined;
   const translate = vi.spyOn(service, 'section').mockResolvedValue('新译文').mockImplementationOnce((_text, _owner, _priority, _signal, onPartial) => {
