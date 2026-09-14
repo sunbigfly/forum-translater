@@ -54,12 +54,12 @@ it('streams text and vocabulary from one request, keeps it alive for words, and 
   expect(host?.hidden).toBe(true);
   responseText += event(JSON.stringify(selected[0]));
   transport?.onprogress?.({ status: 200, responseText });
-  expect(host?.shadowRoot?.querySelectorAll('.word-row')).toHaveLength(1);
-  expect(host?.hidden).toBe(false); expect(finished).toBe(false);
+  await vi.waitFor(() => expect(host?.shadowRoot?.querySelectorAll('.word-row')).toHaveLength(1));
+  expect(host?.hidden).toBe(false); expect(finished).toBe(true); expect(abort).not.toHaveBeenCalled();
   responseText += event(`,${JSON.stringify(selected[1])}]}`);
   transport?.onprogress?.({ status: 200, responseText });
   expect(await promise).toBe('一个重大认识论挑战。');
-  expect(host?.shadowRoot?.querySelectorAll('.word-row')).toHaveLength(2);
+  await vi.waitFor(() => expect(host?.shadowRoot?.querySelectorAll('.word-row')).toHaveLength(2));
   expect(request).toHaveBeenCalledOnce(); expect(abort).toHaveBeenCalledOnce();
   cleanup(); service.destroy();
   service = new TranslationService(settings, new TranslationCache());

@@ -33,6 +33,27 @@ afterEach(() => { runtime?.destroy(); runtime = undefined; service.destroy(); vi
 function title(): HTMLElement { const element = document.querySelector<HTMLElement>('a[slot="title"]'); if (!element) throw new Error('Missing fixture'); return element; }
 async function settle(): Promise<void> { await vi.advanceTimersByTimeAsync(150); }
 
+it('retains completed background translations during a swipe and fills them once scrolling settles', async () => {
+  let partial!: (text: string) => void; let finish!: (text: string) => void;
+  const translate = vi.spyOn(service, 'section').mockImplementation((_text, _owner, _priority, _signal, onPartial) => {
+    if (!onPartial) throw new Error('Missing streaming callback');
+    partial = onPartial; return new Promise(resolve => { finish = resolve; });
+  });
+  runtime = new RedditRuntime(service.settings, service);
+  Observer.instances[0]?.emit(title()); await settle();
+  const box = document.querySelector('[data-ft-owned="translation"]');
+  const placeholder = box?.firstChild;
+  window.dispatchEvent(new TouchEvent('touchstart'));
+  partial('部分译文'); finish('完整译文'); await settle();
+  expect(box?.firstChild).toBe(placeholder); expect(box?.textContent).not.toContain('译文');
+  window.dispatchEvent(new TouchEvent('touchend', { touches: [] }));
+  window.dispatchEvent(new Event('scroll'));
+  await vi.advanceTimersByTimeAsync(160);
+  expect(box?.textContent).toBe('完整译文'); expect(translate).toHaveBeenCalledOnce();
+  Observer.instances[0]?.emit(title()); await settle();
+  expect(translate).toHaveBeenCalledOnce();
+});
+
 it.each([330, 1280])('returns from native Posts at %i px without cloning the retained feed or rescanning the document', async width => {
   const route = { hostname: 'x.com', href: 'https://x.com/home', pathname: '/home' };
   vi.stubGlobal('location', route); vi.stubGlobal('innerWidth', width);
@@ -120,6 +141,7 @@ it('paints persisted feed translations in a fresh detail runtime before new para
   runtime = new RedditRuntime(service.settings, service);
   const detail = document.querySelector('[data-testid="tweetText"]'); if (!detail) throw new Error('Missing detail');
   Observer.instances[0]?.emit(detail);
+  await settle();
   expect(detail.textContent).toContain('已有译文');
   expect(detail.textContent).toContain('截断旧译文');
   expect(pending.mock.calls.map(call => call[0])).toEqual(['Cut off sentence now complete.', 'New paragraph']);
@@ -164,26 +186,28 @@ describe('viewport translation lifecycle', () => {
     const translate = vi.spyOn(service, 'section').mockImplementationOnce(() => new Promise(resolve => { completeFirst = resolve; })).mockImplementationOnce(() => new Promise(resolve => { completeSecond = resolve; }));
     const foreground = vi.spyOn(service, 'setForeground');
     runtime = new RedditRuntime({ ...service.settings, vocabulary: false }, service);
+    await settle();
     expect(foreground).toHaveBeenLastCalledWith(translate.mock.calls[0]?.[1]);
     completeFirst?.('第一条译文'); await settle();
     expect(foreground).toHaveBeenLastCalledWith(translate.mock.calls[1]?.[1]);
     completeSecond?.('第二条译文'); await settle(); expect(foreground).toHaveBeenLastCalledWith(undefined);
   });
-  it('starts already visible text immediately without an observer callback', () => {
+  it('starts already visible text on the next task without an observer callback', async () => {
     vi.spyOn(title(), 'getBoundingClientRect').mockReturnValue({ x: 0, y: 20, top: 20, bottom: 60, left: 0, right: 300, width: 300, height: 40, toJSON: () => ({}) });
     const translate = vi.spyOn(service, 'section').mockResolvedValue('译文');
     runtime = new RedditRuntime(service.settings, service);
+    await vi.advanceTimersByTimeAsync(1);
     expect(translate).toHaveBeenCalledOnce();
     expect(translate.mock.calls[0]?.[2]).toBe('visible');
   });
-  it('starts newly loaded visible text within one 16ms discovery tick', async () => {
+  it('yields after discovery before starting newly loaded visible text', async () => {
     const translate = vi.spyOn(service, 'section').mockResolvedValue('译文');
     runtime = new RedditRuntime({ ...service.settings, title: false, vocabulary: false }, service);
     const post = document.createElement('shreddit-post'); post.innerHTML = '<div slot="text-body"><p>New visible post</p></div>';
     const body = post.querySelector<HTMLElement>('[slot="text-body"]'); if (!body) throw new Error('Missing body');
     vi.spyOn(body, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 20, top: 20, bottom: 60, left: 0, right: 300, width: 300, height: 40, toJSON: () => ({}) });
     document.body.append(post); await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(16);
+    await vi.advanceTimersByTimeAsync(17);
     expect(translate).toHaveBeenCalledOnce();
     expect(translate.mock.calls[0]?.[2]).toBe('visible');
   });
@@ -649,6 +673,7 @@ it('reuses persisted Article paragraphs across normal, expanded and restored vie
     const request = vi.spyOn(service, 'section').mockResolvedValue('不应重复请求');
     runtime = new RedditRuntime(service.settings, service);
     for (const node of document.querySelectorAll('h1,[data-block]')) Observer.instances[0]?.emit(node);
+    await settle();
     expect([...document.querySelectorAll('[data-ft-owned="translation"]')].map(node => node.textContent)).toEqual(['缓存译文', '缓存译文']);
     expect(document.querySelector('.hnr-translation-placeholder')).toBeNull();
     expect(request).not.toHaveBeenCalled();
@@ -660,5 +685,6 @@ it('reuses persisted Article paragraphs across normal, expanded and restored vie
   const otherArticle = vi.spyOn(service, 'section').mockResolvedValue('另一篇文章');
   runtime = new RedditRuntime(service.settings, service);
   for (const node of document.querySelectorAll('h1,[data-block]')) Observer.instances[0]?.emit(node);
+  await settle();
   expect(otherArticle).toHaveBeenCalledTimes(2);
 });

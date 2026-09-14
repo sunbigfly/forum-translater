@@ -33,7 +33,6 @@ export class RedditRuntime {
   private visibleObserver: IntersectionObserver;
   private mutations: MutationObserver;
   private roots = new Set<ParentNode>();
-  private timer: ReturnType<typeof setTimeout> | undefined;
   private sequence = 0;
   private destroyed = false;
   private route = location.href;
@@ -116,7 +115,7 @@ export class RedditRuntime {
       if (!document.hidden) this.start(entry);
     }
   };
-  private schedule(): void { this.timer ??= setTimeout(() => { this.timer = undefined; this.reconcile(); }, 16); }
+  private schedule(): void { this.service.worker.render('reconcile', () => this.reconcile(), 16); }
   private updateForeground(): void {
     const first = [...this.entries.values()].filter(entry => entry.visible && (entry.state === 'idle' || entry.state === 'loading')
       && !isXPostBackground(entry.element) && isReadable(entry.element))
@@ -208,6 +207,7 @@ export class RedditRuntime {
     this.updateForeground();
   }
   private cancel(entry: Entry): void {
+    this.service.worker.release(`start:${entry.owner}`);
     entry.controller?.abort(); entry.controller = null;
     if (entry.state === 'loading') {
       entry.state = 'idle';
@@ -218,6 +218,11 @@ export class RedditRuntime {
     this.service.release(entry.owner);
   }
   private start(entry: Entry, manual = false): void {
+    if (this.destroyed || entry.state !== 'idle' && !(manual && entry.state === 'error')) return;
+    this.service.worker.render(`start:${entry.owner}`, () => this.begin(entry, manual), 0);
+  }
+  private begin(entry: Entry, manual = false): void {
+    if (this.entries.get(entry.element) !== entry) return;
     if (this.destroyed || entry.state !== 'idle' && !(manual && entry.state === 'error')) return;
     if (!isReadable(entry.element) || (!entry.near && !entry.visible && !manual)) return;
     const controller = new AbortController(); entry.controller = controller; entry.state = 'loading';
@@ -320,16 +325,6 @@ export class RedditRuntime {
       && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity
       && this.sourceMatches(entry);
     const running = new Set<number>();
-    let statusTimer: ReturnType<typeof setInterval> | undefined;
-    let startedAt = Date.now();
-    const stopStatus = (): void => { clearInterval(statusTimer); statusTimer = undefined; controller.signal.removeEventListener('abort', stopStatus); };
-    const updateStatus = (): void => {
-      if (!current() || !running.size) { stopStatus(); return; }
-      const label = `${this.service.status(entry.owner)} · 已等待 ${Math.floor((Date.now() - startedAt) / 1000)} 秒`;
-      for (const root of [box, ...entry.inlineBoxes]) for (const status of root.querySelectorAll<HTMLElement>('.hnr-translation-placeholder')) {
-        if (status.dataset.status !== label) status.dataset.status = label;
-      }
-    };
     const render = (): void => {
       if (!current()) return;
       if (entry.kind === 'body' && this.settings.vocabulary && !entry.learning) {
@@ -378,15 +373,11 @@ export class RedditRuntime {
     const run = async (index: number, retry = false): Promise<void> => {
       const plan = plans[index];
       if (!plan || running.has(index) || entry.completed.has(index) || !current()) return;
-      if (!translationBlockNeedsTranslation(plan.text.replace(/⟦\d+⟧/g, ''), true)) { pending.delete(index); render(); return; }
+      if (!translationBlockNeedsTranslation(plan.text.replace(/⟦\d+⟧/g, ''), true)) { pending.delete(index); this.service.worker.render(entry.owner, render); return; }
       running.add(index); failed.delete(index); failureReasons.delete(index); pending.add(index); if (!previews.has(index)) translations.delete(index);
-      if (!statusTimer) {
-        startedAt = Date.now(); statusTimer = setInterval(updateStatus, 1000);
-        controller.signal.addEventListener('abort', stopStatus, { once: true });
-      }
       entry.controller = controller; entry.state = 'loading';
       if (retry || manual) this.service.promote(entry.owner, entry.visible ? 'visible' : 'interactive');
-      render();
+      if (retry) this.service.worker.render(entry.owner, render);
       try {
         const value = await this.service.section(plan.text, entry.owner, entry.visible ? 'visible' : retry ? 'interactive' : priority, controller.signal, partial => {
           if (controller.signal.aborted || !box.isConnected || previews.has(index)) return;
@@ -401,18 +392,18 @@ export class RedditRuntime {
           this.completedParagraphs.delete(key); this.completedParagraphs.set(key, value);
           while (this.completedParagraphs.size > 500) { const oldest = this.completedParagraphs.keys().next().value; if (oldest === undefined) break; this.completedParagraphs.delete(oldest); }
         }
-        render();
+        this.service.worker.render(entry.owner, render);
       } catch (error) {
         if (!current()) return;
         let message = error instanceof Error ? `${error.name}: ${error.message}` : '未知错误';
         if (this.settings.ai.apiKey) message = message.replaceAll(this.settings.ai.apiKey, '[已隐藏]');
         failureReasons.set(index, message.replace(/https?:\/\/\S+/g, '[服务地址]').slice(0, 180));
-        streaming.delete(index); if (!previews.has(index)) translations.delete(index); failed.add(index); render();
+        streaming.delete(index); if (!previews.has(index)) translations.delete(index); failed.add(index); this.service.worker.render(entry.owner, render);
       } finally {
         running.delete(index);
-        if (!running.size) stopStatus();
         if (current() && !running.size) {
           entry.controller = null; entry.state = failed.size ? 'error' : 'done'; this.service.release(entry.owner); this.updateForeground();
+          this.service.worker.render(entry.owner, render);
         }
         else if (!running.size && !controller.signal.aborted && entry.controller === controller) {
           // A route/DOM transition can invalidate the result before reconciliation.
@@ -427,7 +418,7 @@ export class RedditRuntime {
   }
 
   destroy(): void {
-    this.destroyed = true; this.tabTitle.destroy(); this.feed.reset(); clearTimeout(this.timer); this.mutations.disconnect(); this.nearObserver.disconnect(); this.visibleObserver.disconnect();
+    this.destroyed = true; this.tabTitle.destroy(); this.feed.reset(); this.mutations.disconnect(); this.nearObserver.disconnect(); this.visibleObserver.disconnect();
     document.removeEventListener('click', this.onCommentExpansion, true);
     document.removeEventListener('toggle', this.onCommentExpansion, true);
     document.removeEventListener('visibilitychange', this.onVisibility); window.removeEventListener('popstate', this.onRoute);

@@ -86,6 +86,7 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 /* Keep inline videos compact when the reading column is widened. */
 [data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){position:relative!important;width:min(100%,var(--ft-media-fit-width,var(--ft-x-video-width,420px)))!important;max-width:var(--ft-x-video-width,420px)!important;min-width:0!important}
 [data-ft-image-resizable]{position:relative!important;width:100%!important;max-width:var(--ft-x-image-width,420px)!important;min-width:0!important}
+:is([data-ft-video-resizable],[data-ft-image-resizable]){box-sizing:border-box}
 /* Reddit media slots retain their native player/gallery and share only resize controls. */
 [data-ft-reddit-media]{--ft-x-image-width:var(--ft-reddit-image-width,420px);--ft-x-video-width:var(--ft-reddit-video-width,420px);box-sizing:border-box;align-self:flex-start}
 [data-ft-reddit-media]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){height:auto!important;min-height:0!important}
@@ -123,6 +124,11 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-owned="video-resize"] :is([data-edge="left"],[data-edge="right"])::after{height:32px;width:3px;top:calc(50% - 16px);left:4px}
 [data-ft-owned="video-resize"] button:focus-visible{outline:2px solid #1d9bf0;outline-offset:-2px}
 :fullscreen [data-ft-owned="video-resize"],[data-ft-video-resizable]:has(:fullscreen) > [data-ft-owned="video-resize"]{display:none}
+/* Touch screens use the post width; saved desktop sizes never constrain mobile media. */
+@media(max-width:700px),(pointer:coarse){
+[data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *),[data-ft-image-resizable]{width:100%!important;max-width:100%!important;min-width:0!important;align-self:stretch}
+[data-ft-owned="video-resize"]{display:none!important;pointer-events:none!important}
+}
 [data-ft-x-hide-icons] :is([data-testid="GrokDrawer"],[data-testid="chat-drawer-root"]){display:none!important}
 @media(min-width:701px){
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"]{align-items:center!important;width:100%;min-width:0}

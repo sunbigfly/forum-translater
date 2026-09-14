@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.7
+// @version      0.2.8
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -2539,15 +2539,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     const loadExample = createExampleLoader(service, controller.signal);
     const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl, loadExample));
     let currentWords = [];
-    let highlightTimer;
+    const highlightOwner = {};
+    const paintOwner = {};
     const observeTranslations = () => {
       if (targets) translationObserver.observe(targets.original, { childList: true, characterData: true, subtree: true });
       for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ["data-ft-streaming"] });
     };
     const refreshHighlights = () => {
       if (!targets || controller.signal.aborted) return;
-      clearTimeout(highlightTimer);
-      highlightTimer = void 0;
+      service.worker.release(highlightOwner);
       translationObserver.disconnect();
       try {
         highlights.apply(targets.original, targets.translations, currentWords);
@@ -2561,7 +2561,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         const target = record3.target instanceof Element ? record3.target : record3.target.parentElement;
         return !!target?.closest('[data-ft-owned="translation"][data-ft-streaming]');
       })) return;
-      highlightTimer ??= setTimeout(refreshHighlights, 120);
+      service.worker.render(highlightOwner, refreshHighlights, 120);
     });
     observeTranslations();
     let running = false;
@@ -2590,7 +2590,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       });
       more.className = "more";
       more.setAttribute("aria-expanded", "false");
-      const fill = (result) => {
+      const paint = (result) => {
         if (controller.signal.aborted) return;
         const identities = result.map((word) => JSON.stringify(word));
         if (identities.length === displayedWords.length && identities.every((value, index) => value === displayedWords[index])) return;
@@ -2695,6 +2695,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         currentWords = result;
         refreshHighlights();
       };
+      const fill = (result) => {
+        service.worker.render(paintOwner, () => paint(result));
+      };
       try {
         if (service.settings.provider === "ai") {
           stopCombined?.();
@@ -2706,10 +2709,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         } });
         if (controller.signal.aborted) return;
         fill(result);
-        currentWords = result;
-        refreshHighlights();
         status.textContent = "";
-        host.hidden = result.length === 0;
       } catch {
         if (!controller.signal.aborted) {
           host.hidden = false;
@@ -2726,7 +2726,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     void Promise.resolve().then(load);
     return () => {
       controller.abort();
-      clearTimeout(highlightTimer);
+      service.worker.release(highlightOwner);
+      service.worker.release(paintOwner);
       stopCombined?.();
       visibility?.disconnect();
       translationObserver.disconnect();
@@ -3615,8 +3616,38 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     batcher;
     paints = /* @__PURE__ */ new Map();
     timer;
+    resumeAt = 0;
+    touching = false;
     constructor(ai) {
       this.batcher = new AiBatcher(ai, this.tasks);
+      if (typeof window !== "undefined") {
+        window.addEventListener("scroll", this.onScroll, { capture: true, passive: true });
+        window.addEventListener("wheel", this.onScroll, { passive: true });
+        window.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
+        window.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
+        window.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
+        window.addEventListener("blur", this.onBlur);
+      }
+    }
+    onScroll = () => {
+      this.resumeAt = Date.now() + 160;
+    };
+    onTouchStart = () => {
+      this.touching = true;
+      this.onScroll();
+    };
+    onTouchEnd = (event) => {
+      this.touching = event.touches.length > 0;
+      this.onScroll();
+      if (this.paints.size && !this.touching) this.schedule(160);
+    };
+    onBlur = () => {
+      this.touching = false;
+      this.onScroll();
+      if (this.paints.size) this.schedule(160);
+    };
+    schedule(delay) {
+      this.timer ??= setTimeout(() => this.paintNext(), delay);
     }
     preprocess(text2, ai) {
       return splitText(text2, ai ? 6e3 : 900);
@@ -3624,12 +3655,17 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     format(source, value) {
       return validateTranslation(source, value);
     }
-    render(owner, paint) {
+    render(owner, paint, delay = 80) {
       this.paints.set(owner, paint);
-      this.timer ??= setTimeout(() => this.paintNext(), 80);
+      this.schedule(delay);
     }
     paintNext() {
       this.timer = void 0;
+      if (this.touching || !this.paints.size) return;
+      if (Date.now() < this.resumeAt) {
+        this.schedule(this.resumeAt - Date.now());
+        return;
+      }
       const next = this.paints.entries().next().value;
       if (!next) return;
       const [owner, update] = next;
@@ -3637,13 +3673,21 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       try {
         update();
       } finally {
-        if (this.paints.size && !this.timer) this.timer = setTimeout(() => this.paintNext(), 16);
+        if (this.paints.size) this.schedule(16);
       }
     }
     release(owner) {
       this.paints.delete(owner);
     }
     destroy() {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("scroll", this.onScroll, true);
+        window.removeEventListener("wheel", this.onScroll);
+        window.removeEventListener("touchstart", this.onTouchStart, true);
+        window.removeEventListener("touchend", this.onTouchEnd, true);
+        window.removeEventListener("touchcancel", this.onTouchEnd, true);
+        window.removeEventListener("blur", this.onBlur);
+      }
       clearTimeout(this.timer);
       this.paints.clear();
       this.batcher.destroy();
@@ -4065,7 +4109,6 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     visibleObserver;
     mutations;
     roots = /* @__PURE__ */ new Set();
-    timer;
     sequence = 0;
     destroyed = false;
     route = location.href;
@@ -4122,10 +4165,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       }
     };
     schedule() {
-      this.timer ??= setTimeout(() => {
-        this.timer = void 0;
-        this.reconcile();
-      }, 16);
+      this.service.worker.render("reconcile", () => this.reconcile(), 16);
     }
     updateForeground() {
       const first = [...this.entries.values()].filter((entry) => entry.visible && (entry.state === "idle" || entry.state === "loading") && !isXPostBackground(entry.element) && isReadable(entry.element)).sort((a2, b) => a2.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top)[0];
@@ -4250,6 +4290,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.updateForeground();
     }
     cancel(entry) {
+      this.service.worker.release(`start:${entry.owner}`);
       entry.controller?.abort();
       entry.controller = null;
       if (entry.state === "loading") {
@@ -4266,6 +4307,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.service.release(entry.owner);
     }
     start(entry, manual = false) {
+      if (this.destroyed || entry.state !== "idle" && !(manual && entry.state === "error")) return;
+      this.service.worker.render(`start:${entry.owner}`, () => this.begin(entry, manual), 0);
+    }
+    begin(entry, manual = false) {
+      if (this.entries.get(entry.element) !== entry) return;
       if (this.destroyed || entry.state !== "idle" && !(manual && entry.state === "error")) return;
       if (!isReadable(entry.element) || !entry.near && !entry.visible && !manual) return;
       const controller = new AbortController();
@@ -4379,23 +4425,6 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       }
       const current = () => !controller.signal.aborted && !this.destroyed && (this.route === location.href || isXPostBackground(entry.element) || isXPostBackgroundRoute(entry.element)) && entry.element.isConnected && box.isConnected && contentIdentity(entry.element) === entry.identity && this.sourceMatches(entry);
       const running = /* @__PURE__ */ new Set();
-      let statusTimer;
-      let startedAt = Date.now();
-      const stopStatus = () => {
-        clearInterval(statusTimer);
-        statusTimer = void 0;
-        controller.signal.removeEventListener("abort", stopStatus);
-      };
-      const updateStatus = () => {
-        if (!current() || !running.size) {
-          stopStatus();
-          return;
-        }
-        const label = `${this.service.status(entry.owner)} · 已等待 ${Math.floor((Date.now() - startedAt) / 1e3)} 秒`;
-        for (const root of [box, ...entry.inlineBoxes]) for (const status of root.querySelectorAll(".hnr-translation-placeholder")) {
-          if (status.dataset.status !== label) status.dataset.status = label;
-        }
-      };
       const render = () => {
         if (!current()) return;
         if (entry.kind === "body" && this.settings.vocabulary && !entry.learning) {
@@ -4477,7 +4506,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         if (!plan || running.has(index) || entry.completed.has(index) || !current()) return;
         if (!translationBlockNeedsTranslation(plan.text.replace(/⟦\d+⟧/g, ""), true)) {
           pending.delete(index);
-          render();
+          this.service.worker.render(entry.owner, render);
           return;
         }
         running.add(index);
@@ -4485,15 +4514,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         failureReasons.delete(index);
         pending.add(index);
         if (!previews.has(index)) translations.delete(index);
-        if (!statusTimer) {
-          startedAt = Date.now();
-          statusTimer = setInterval(updateStatus, 1e3);
-          controller.signal.addEventListener("abort", stopStatus, { once: true });
-        }
         entry.controller = controller;
         entry.state = "loading";
         if (retry || manual) this.service.promote(entry.owner, entry.visible ? "visible" : "interactive");
-        render();
+        if (retry) this.service.worker.render(entry.owner, render);
         try {
           const value = await this.service.section(plan.text, entry.owner, entry.visible ? "visible" : retry ? "interactive" : priority, controller.signal, (partial) => {
             if (controller.signal.aborted || !box.isConnected || previews.has(index)) return;
@@ -4518,7 +4542,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
               this.completedParagraphs.delete(oldest);
             }
           }
-          render();
+          this.service.worker.render(entry.owner, render);
         } catch (error) {
           if (!current()) return;
           let message = error instanceof Error ? `${error.name}: ${error.message}` : "未知错误";
@@ -4527,15 +4551,15 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           streaming.delete(index);
           if (!previews.has(index)) translations.delete(index);
           failed.add(index);
-          render();
+          this.service.worker.render(entry.owner, render);
         } finally {
           running.delete(index);
-          if (!running.size) stopStatus();
           if (current() && !running.size) {
             entry.controller = null;
             entry.state = failed.size ? "error" : "done";
             this.service.release(entry.owner);
             this.updateForeground();
+            this.service.worker.render(entry.owner, render);
           } else if (!running.size && !controller.signal.aborted && entry.controller === controller) {
             this.cancel(entry);
             this.roots.add(entry.element);
@@ -4555,7 +4579,6 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.destroyed = true;
       this.tabTitle.destroy();
       this.feed.reset();
-      clearTimeout(this.timer);
       this.mutations.disconnect();
       this.nearObserver.disconnect();
       this.visibleObserver.disconnect();
@@ -5587,15 +5610,21 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const saved = GM_getValue(this.sizeKey, DEFAULT_WIDTH);
       if (typeof saved === "number" && Number.isFinite(saved)) this.width = Math.max(180, Math.min(2400, saved));
       this.applyWidth(this.width);
-      if (this.site === "x" && this.kind === "video") window.addEventListener("resize", this.refit);
+      window.addEventListener("resize", this.onViewportChange);
+      this.coarsePointer?.addEventListener("change", this.onViewportChange);
     }
     roots = /* @__PURE__ */ new Map();
     cancelDrag;
     width = DEFAULT_WIDTH;
     contentListeners = /* @__PURE__ */ new Map();
+    coarsePointer = typeof matchMedia === "function" ? matchMedia("(pointer: coarse)") : void 0;
+    automatic() {
+      return innerWidth <= 700 || !!this.coarsePointer?.matches;
+    }
     fitContent(root) {
       if (document.fullscreenElement || this.kind !== "video" || this.site !== "x") return;
       root.style.removeProperty("--ft-media-fit-width");
+      if (this.automatic()) return;
       const player = root.querySelector('[data-testid="videoPlayer"],video');
       if (!player) return;
       const content = player.getBoundingClientRect();
@@ -5654,6 +5683,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             event.stopPropagation();
           };
           handle.onkeydown = (event) => {
+            if (this.automatic()) return;
             if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
             event.preventDefault();
             event.stopPropagation();
@@ -5662,7 +5692,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
             GM_setValue(this.sizeKey, this.width);
           };
           handle.onpointerdown = (event) => {
-            if (event.button !== 0 || document.fullscreenElement) return;
+            if (event.button !== 0 || document.fullscreenElement || this.automatic() || event.pointerType === "touch") return;
             event.preventDefault();
             event.stopPropagation();
             this.cancelDrag?.();
@@ -5751,6 +5781,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     refit = () => {
       for (const root of this.roots.keys()) if (root.isConnected) this.fitContent(root);
     };
+    onViewportChange = () => {
+      this.cancelDrag?.();
+      this.refit();
+    };
     clamp(root, width) {
       const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
       return this.clampAvailable(available, width);
@@ -5765,7 +5799,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.refit();
     }
     destroy() {
-      window.removeEventListener("resize", this.refit);
+      window.removeEventListener("resize", this.onViewportChange);
+      this.coarsePointer?.removeEventListener("change", this.onViewportChange);
       this.cancelDrag?.();
       for (const [root, controls] of this.roots) {
         controls.remove();
@@ -6298,6 +6333,7 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 /* Keep inline videos compact when the reading column is widened. */
 [data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){position:relative!important;width:min(100%,var(--ft-media-fit-width,var(--ft-x-video-width,420px)))!important;max-width:var(--ft-x-video-width,420px)!important;min-width:0!important}
 [data-ft-image-resizable]{position:relative!important;width:100%!important;max-width:var(--ft-x-image-width,420px)!important;min-width:0!important}
+:is([data-ft-video-resizable],[data-ft-image-resizable]){box-sizing:border-box}
 /* Reddit media slots retain their native player/gallery and share only resize controls. */
 [data-ft-reddit-media]{--ft-x-image-width:var(--ft-reddit-image-width,420px);--ft-x-video-width:var(--ft-reddit-video-width,420px);box-sizing:border-box;align-self:flex-start}
 [data-ft-reddit-media]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *){height:auto!important;min-height:0!important}
@@ -6335,6 +6371,11 @@ header[role="banner"] [data-testid="SideNav_NewTweet_Button"]::after{content:att
 [data-ft-owned="video-resize"] :is([data-edge="left"],[data-edge="right"])::after{height:32px;width:3px;top:calc(50% - 16px);left:4px}
 [data-ft-owned="video-resize"] button:focus-visible{outline:2px solid #1d9bf0;outline-offset:-2px}
 :fullscreen [data-ft-owned="video-resize"],[data-ft-video-resizable]:has(:fullscreen) > [data-ft-owned="video-resize"]{display:none}
+/* Touch screens use the post width; saved desktop sizes never constrain mobile media. */
+@media(max-width:700px),(pointer:coarse){
+[data-ft-video-resizable]:not(:fullscreen):not(:has(:fullscreen)):not(:fullscreen *),[data-ft-image-resizable]{width:100%!important;max-width:100%!important;min-width:0!important;align-self:stretch}
+[data-ft-owned="video-resize"]{display:none!important;pointer-events:none!important}
+}
 [data-ft-x-hide-icons] :is([data-testid="GrokDrawer"],[data-testid="chat-drawer-root"]){display:none!important}
 @media(min-width:701px){
 [data-ft-x-sidebar-collapsed][data-ft-x-right-hidden] main[role="main"]{align-items:center!important;width:100%;min-width:0}

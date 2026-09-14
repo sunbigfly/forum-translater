@@ -5,10 +5,14 @@ export class XVideoResize {
   private cancelDrag: (() => void) | undefined;
   private width = DEFAULT_WIDTH;
   private contentListeners = new Map<HTMLElement, () => void>();
+  private coarsePointer = typeof matchMedia === 'function' ? matchMedia('(pointer: coarse)') : undefined;
+
+  private automatic(): boolean { return innerWidth <= 700 || !!this.coarsePointer?.matches; }
 
   private fitContent(root: HTMLElement): void {
     if (document.fullscreenElement || this.kind !== 'video' || this.site !== 'x') return;
     root.style.removeProperty('--ft-media-fit-width');
+    if (this.automatic()) return;
     const player = root.querySelector<HTMLElement>('[data-testid="videoPlayer"],video');
     if (!player) return;
     const content = player.getBoundingClientRect(); const frame = root.getBoundingClientRect();
@@ -33,7 +37,8 @@ export class XVideoResize {
     const saved: unknown = GM_getValue(this.sizeKey, DEFAULT_WIDTH);
     if (typeof saved === 'number' && Number.isFinite(saved)) this.width = Math.max(180, Math.min(2400, saved));
     this.applyWidth(this.width);
-    if (this.site === 'x' && this.kind === 'video') window.addEventListener('resize', this.refit);
+    window.addEventListener('resize', this.onViewportChange);
+    this.coarsePointer?.addEventListener('change', this.onViewportChange);
   }
 
   reconcile(mediaRoots?: Iterable<HTMLElement>): void {
@@ -72,13 +77,14 @@ export class XVideoResize {
         handle.title = '拖动调整大小；方向键微调';
         handle.onclick = event => { event.preventDefault(); event.stopPropagation(); };
         handle.onkeydown = event => {
+          if (this.automatic()) return;
           if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
           event.preventDefault(); event.stopPropagation();
           this.width = this.clamp(root, root.getBoundingClientRect().width + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 20 : -20));
           this.applyWidth(this.width); GM_setValue(this.sizeKey, this.width);
         };
         handle.onpointerdown = event => {
-          if (event.button !== 0 || document.fullscreenElement) return;
+          if (event.button !== 0 || document.fullscreenElement || this.automatic() || event.pointerType === 'touch') return;
           event.preventDefault(); event.stopPropagation(); this.cancelDrag?.();
           const rect = root.getBoundingClientRect();
           if (!rect.width || !rect.height) return;
@@ -145,6 +151,7 @@ export class XVideoResize {
   }
 
   private refit = (): void => { for (const root of this.roots.keys()) if (root.isConnected) this.fitContent(root); };
+  private onViewportChange = (): void => { this.cancelDrag?.(); this.refit(); };
   private clamp(root: HTMLElement, width: number): number {
     const available = root.parentElement?.getBoundingClientRect().width || innerWidth;
     return this.clampAvailable(available, width);
@@ -159,7 +166,8 @@ export class XVideoResize {
     this.refit();
   }
   destroy(): void {
-    window.removeEventListener('resize', this.refit);
+    window.removeEventListener('resize', this.onViewportChange);
+    this.coarsePointer?.removeEventListener('change', this.onViewportChange);
     this.cancelDrag?.();
     for (const [root, controls] of this.roots) { controls.remove(); root.removeAttribute(this.attribute); this.unwatch(root); }
     this.roots.clear(); document.documentElement.style.removeProperty(this.widthProperty);

@@ -141,14 +141,14 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
   const loadExample = createExampleLoader(service, controller.signal);
   const highlights = new VocabularyHighlights((target, word) => showWordPopup(target, word, sourceUrl, loadExample));
   let currentWords: VocabularyWord[] = [];
-  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
+  const highlightOwner = {}; const paintOwner = {};
   const observeTranslations = (): void => {
     if (targets) translationObserver.observe(targets.original, { childList: true, characterData: true, subtree: true });
     for (const target of targets?.translations ?? []) translationObserver.observe(target, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['data-ft-streaming'] });
   };
   const refreshHighlights = (): void => {
     if (!targets || controller.signal.aborted) return;
-    clearTimeout(highlightTimer); highlightTimer = undefined;
+    service.worker.release(highlightOwner);
     translationObserver.disconnect();
     try { highlights.apply(targets.original, targets.translations, currentWords); }
     finally { observeTranslations(); }
@@ -159,7 +159,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       const target = record.target instanceof Element ? record.target : record.target.parentElement;
       return !!target?.closest('[data-ft-owned="translation"][data-ft-streaming]');
     })) return;
-    highlightTimer ??= setTimeout(refreshHighlights, 120);
+    service.worker.render(highlightOwner, refreshHighlights, 120);
   });
   observeTranslations();
   let running = false;
@@ -177,7 +177,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       [...cards.children].forEach((card, index) => { if (card instanceof HTMLElement) card.hidden = !expanded && index >= 3; });
       more.textContent = expanded ? '收起' : `展开其余 ${displayed - 3} 词`; more.setAttribute('aria-expanded', String(expanded));
     }); more.className = 'more'; more.setAttribute('aria-expanded', 'false');
-    const fill = (result: VocabularyWord[]): void => {
+    const paint = (result: VocabularyWord[]): void => {
       if (controller.signal.aborted) return;
       const identities = result.map(word => JSON.stringify(word));
       if (identities.length === displayedWords.length && identities.every((value, index) => value === displayedWords[index])) return;
@@ -230,6 +230,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       host.hidden = result.length === 0;
       currentWords = result; refreshHighlights();
     };
+    const fill = (result: VocabularyWord[]): void => { service.worker.render(paintOwner, () => paint(result)); };
     try {
       if (service.settings.provider === 'ai') {
         stopCombined?.(); stopCombined = service.watchVocabulary(source, fill);
@@ -238,14 +239,13 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       const result = await collectVocabulary(source, service.settings, service.tasks, controller.signal, '', fill, { priority: () => visible ? 'visible' : 'prefetch', queued: key => { queuedKey = key; } });
       if (controller.signal.aborted) return;
       fill(result);
-      currentWords = result; refreshHighlights();
-      status.textContent = ''; host.hidden = result.length === 0;
+      status.textContent = '';
     } catch {
       if (!controller.signal.aborted) { host.hidden = false; status.textContent = '词汇生成失败，请检查设置中的 AI 地址、密钥和模型。'; actions.append(button('重试词汇生成', () => { void load(); })); }
     } finally { running = false; section.removeAttribute('aria-busy'); }
   };
   void Promise.resolve().then(load);
-  return () => { controller.abort(); clearTimeout(highlightTimer); stopCombined?.(); visibility?.disconnect(); translationObserver.disconnect(); highlights.clear(); stopWordSpeech(shadow); host.remove(); };
+  return () => { controller.abort(); service.worker.release(highlightOwner); service.worker.release(paintOwner); stopCombined?.(); visibility?.disconnect(); translationObserver.disconnect(); highlights.clear(); stopWordSpeech(shadow); host.remove(); };
 }
 
 export function renderWordbook(root: HTMLElement): () => void {

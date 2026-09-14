@@ -3,6 +3,26 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { XVideoResize } from '../src/x-video-resize';
 
 afterEach(() => { vi.unstubAllGlobals(); document.body.replaceChildren(); document.documentElement.style.removeProperty('--ft-x-video-width'); });
+it.each(['x', 'reddit'] as const)('ignores mobile resize gestures and retains the saved desktop size on %s', site => {
+  vi.stubGlobal('innerWidth', 390);
+  vi.stubGlobal('GM_getValue', () => 240);
+  const save = vi.fn(); vi.stubGlobal('GM_setValue', save);
+  const root = document.createElement('div'); root.innerHTML = '<video></video>'; document.body.append(root);
+  const measure = vi.fn(() => ({ width: 390, height: 220 } as DOMRect)); root.getBoundingClientRect = measure;
+  const resize = new XVideoResize('video', site); resize.reconcile([root]);
+  const handle = root.querySelector('[data-edge="right"]');
+  const pointer = new Event('pointerdown', { bubbles: true, cancelable: true });
+  Object.assign(pointer, { button: 0, pointerId: 1, pointerType: 'touch', clientX: 390, clientY: 10 });
+  handle?.dispatchEvent(pointer);
+  handle?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  expect(pointer.defaultPrevented).toBe(false); expect(measure).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
+  expect(document.documentElement.style.getPropertyValue(`--ft-${site}-video-width`)).toBe('240px');
+  vi.stubGlobal('innerWidth', 1280);
+  handle?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  expect(save).toHaveBeenCalledWith(`ft:${site}-video-width:v1`, 410);
+  resize.destroy();
+});
 it('fits the outer frame to capped portrait content without replacing the saved width', () => {
   vi.stubGlobal('GM_getValue', (_key: string, fallback: unknown) => fallback);
   const save = vi.fn(); vi.stubGlobal('GM_setValue', save);
