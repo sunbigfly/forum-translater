@@ -21,9 +21,9 @@ export class XPostViewport {
   private returningRoute: string | undefined;
   constructor() {
     document.addEventListener('click', this.capture, true);
-    window.addEventListener('wheel', this.cancel, { passive: true });
-    window.addEventListener('touchstart', this.cancel, { passive: true });
-    window.addEventListener('pointerdown', this.cancel, { passive: true });
+    window.addEventListener('wheel', this.cancel, { capture: true, passive: true });
+    window.addEventListener('touchstart', this.cancel, { capture: true, passive: true });
+    window.addEventListener('pointerdown', this.cancel, { capture: true, passive: true });
     window.addEventListener('keydown', this.onKey, true);
     window.addEventListener('resize', this.cancel);
   }
@@ -157,7 +157,7 @@ export class XPostViewport {
   destroy(): void {
     this.cancel(); this.snapshots = [];
     document.removeEventListener('click', this.capture, true);
-    window.removeEventListener('wheel', this.cancel); window.removeEventListener('touchstart', this.cancel);
-    window.removeEventListener('pointerdown', this.cancel); window.removeEventListener('keydown', this.onKey, true); window.removeEventListener('resize', this.cancel);
+    window.removeEventListener('wheel', this.cancel, true); window.removeEventListener('touchstart', this.cancel, true);
+    window.removeEventListener('pointerdown', this.cancel, true); window.removeEventListener('keydown', this.onKey, true); window.removeEventListener('resize', this.cancel);
   }
 }

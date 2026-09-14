@@ -17,8 +17,10 @@ it('reconciles return navigation immediately ahead of the deferred media scan', 
     route.pathname = '/user/status/123'; window.dispatchEvent(new PopStateEvent('popstate'));
     expect(viewport).toHaveBeenCalledOnce(); expect(media).not.toHaveBeenCalled();
     document.body.append(document.createElement('main')); await Promise.resolve();
+    expect(viewport).toHaveBeenCalledOnce(); expect(media).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(150);
     expect(viewport).toHaveBeenCalledTimes(2); expect(media).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(150); expect(media).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(32); expect(media).toHaveBeenCalledTimes(2);
   } finally { layout?.destroy(); viewport.mockRestore(); media.mockRestore(); vi.useRealTimers(); }
 });
 it('uses the native post back button on Escape and respects editing and dialogs', () => {
@@ -118,7 +120,7 @@ it('provides the control without a native logo and reattaches after navigation r
   expect(toggle?.getAttribute('aria-expanded')).toBe('false');
   const header = document.querySelector('header'); if (!header) throw new Error('Missing header');
   header.innerHTML = '<div><nav><a href="/home">Home</a></nav></div>';
-  await Promise.resolve(); await vi.advanceTimersByTimeAsync(150);
+  await Promise.resolve(); await vi.advanceTimersByTimeAsync(220);
   expect(document.querySelector('[data-ft-owned="x-sidebar-brand"] + nav')?.previousElementSibling).toBe(brand);
   expect(document.querySelector('[data-ft-owned="x-sidebar-toggle"]')).toBe(toggle);
   layout.destroy(); vi.useRealTimers();

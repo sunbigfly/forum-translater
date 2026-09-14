@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.8
+// @version      0.2.9
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -3587,47 +3587,20 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     }
   };
 
-  // src/translation/worker-controller.ts
-  function splitText(text2, limit = 900) {
-    const chunks = [];
-    let chunk = "";
-    for (const token of text2.match(/⟦\d+⟧|[^⟦]+|⟦/gu) ?? []) {
-      if (/^⟦\d+⟧$/.test(token)) {
-        if (chunk.length + token.length > limit && chunk) {
-          chunks.push(chunk);
-          chunk = "";
-        }
-        chunk += token;
-        continue;
-      }
-      for (const char of token) {
-        if (chunk.length + char.length > limit) {
-          chunks.push(chunk);
-          chunk = "";
-        }
-        chunk += char;
-      }
-    }
-    if (chunk) chunks.push(chunk);
-    return chunks;
-  }
-  var TranslationWorkerController = class {
-    tasks = new TranslationTaskManager({ maxConcurrent: 6, maxPrefetchConcurrent: 2, maxVocabularyConcurrent: 2 });
-    batcher;
+  // src/scroll-idle-queue.ts
+  var ScrollIdleQueue = class {
     paints = /* @__PURE__ */ new Map();
     timer;
     resumeAt = 0;
     touching = false;
-    constructor(ai) {
-      this.batcher = new AiBatcher(ai, this.tasks);
-      if (typeof window !== "undefined") {
-        window.addEventListener("scroll", this.onScroll, { capture: true, passive: true });
-        window.addEventListener("wheel", this.onScroll, { passive: true });
-        window.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
-        window.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
-        window.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
-        window.addEventListener("blur", this.onBlur);
-      }
+    constructor() {
+      if (typeof window === "undefined") return;
+      window.addEventListener("scroll", this.onScroll, { capture: true, passive: true });
+      window.addEventListener("wheel", this.onScroll, { passive: true });
+      window.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
+      window.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
+      window.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
+      window.addEventListener("blur", this.onBlur);
     }
     onScroll = () => {
       this.resumeAt = Date.now() + 160;
@@ -3648,12 +3621,6 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     };
     schedule(delay) {
       this.timer ??= setTimeout(() => this.paintNext(), delay);
-    }
-    preprocess(text2, ai) {
-      return splitText(text2, ai ? 6e3 : 900);
-    }
-    format(source, value) {
-      return validateTranslation(source, value);
     }
     render(owner, paint, delay = 80) {
       this.paints.set(owner, paint);
@@ -3690,6 +3657,48 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       }
       clearTimeout(this.timer);
       this.paints.clear();
+    }
+  };
+
+  // src/translation/worker-controller.ts
+  function splitText(text2, limit = 900) {
+    const chunks = [];
+    let chunk = "";
+    for (const token of text2.match(/⟦\d+⟧|[^⟦]+|⟦/gu) ?? []) {
+      if (/^⟦\d+⟧$/.test(token)) {
+        if (chunk.length + token.length > limit && chunk) {
+          chunks.push(chunk);
+          chunk = "";
+        }
+        chunk += token;
+        continue;
+      }
+      for (const char of token) {
+        if (chunk.length + char.length > limit) {
+          chunks.push(chunk);
+          chunk = "";
+        }
+        chunk += char;
+      }
+    }
+    if (chunk) chunks.push(chunk);
+    return chunks;
+  }
+  var TranslationWorkerController = class extends ScrollIdleQueue {
+    tasks = new TranslationTaskManager({ maxConcurrent: 6, maxPrefetchConcurrent: 2, maxVocabularyConcurrent: 2 });
+    batcher;
+    constructor(ai) {
+      super();
+      this.batcher = new AiBatcher(ai, this.tasks);
+    }
+    preprocess(text2, ai) {
+      return splitText(text2, ai ? 6e3 : 900);
+    }
+    format(source, value) {
+      return validateTranslation(source, value);
+    }
+    destroy() {
+      super.destroy();
       this.batcher.destroy();
       this.tasks.destroy();
     }
@@ -5394,9 +5403,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     returningRoute;
     constructor() {
       document.addEventListener("click", this.capture, true);
-      window.addEventListener("wheel", this.cancel, { passive: true });
-      window.addEventListener("touchstart", this.cancel, { passive: true });
-      window.addEventListener("pointerdown", this.cancel, { passive: true });
+      window.addEventListener("wheel", this.cancel, { capture: true, passive: true });
+      window.addEventListener("touchstart", this.cancel, { capture: true, passive: true });
+      window.addEventListener("pointerdown", this.cancel, { capture: true, passive: true });
       window.addEventListener("keydown", this.onKey, true);
       window.addEventListener("resize", this.cancel);
     }
@@ -5558,9 +5567,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.cancel();
       this.snapshots = [];
       document.removeEventListener("click", this.capture, true);
-      window.removeEventListener("wheel", this.cancel);
-      window.removeEventListener("touchstart", this.cancel);
-      window.removeEventListener("pointerdown", this.cancel);
+      window.removeEventListener("wheel", this.cancel, true);
+      window.removeEventListener("touchstart", this.cancel, true);
+      window.removeEventListener("pointerdown", this.cancel, true);
       window.removeEventListener("keydown", this.onKey, true);
       window.removeEventListener("resize", this.cancel);
     }
@@ -5614,6 +5623,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.coarsePointer?.addEventListener("change", this.onViewportChange);
     }
     roots = /* @__PURE__ */ new Map();
+    parents = /* @__PURE__ */ new WeakMap();
     cancelDrag;
     width = DEFAULT_WIDTH;
     contentListeners = /* @__PURE__ */ new Map();
@@ -5658,6 +5668,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const desired = new Set(mediaRoots);
       for (const player of mediaRoots ? [] : document.querySelectorAll(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
         if (this.kind === "image" && player.closest('[data-ft-video-resizable],[data-testid="videoComponent"],[data-testid="videoPlayer"]')) continue;
+        const known = player.closest(`[${this.attribute}]`);
+        if (known && this.roots.has(known) && this.parents.get(known) === known.parentElement && (desired.has(known) || !containsPost(known))) {
+          desired.add(known);
+          continue;
+        }
         let root = this.kind === "video" ? player.closest('[data-testid="videoComponent"]') ?? player.parentElement : player.closest("a") ?? player;
         if (root && containsPost(root)) root = player.parentElement;
         for (let parent = root?.parentElement; parent && !parent.matches('article,[data-testid="cellInnerDiv"]'); parent = parent.parentElement) {
@@ -5757,6 +5772,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         }
         root.append(controls);
         this.roots.set(root, controls);
+        this.parents.set(root, root.parentElement);
         if (this.kind === "video" && this.site === "x") {
           const fit = () => this.fitContent(root);
           root.addEventListener("loadedmetadata", fit, true);
@@ -5819,6 +5835,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.settings = settings;
       this.save = save;
       if (!isXSite()) return;
+      this.work = new ScrollIdleQueue();
       this.viewport = new XPostViewport();
       this.videos = new XVideoResize();
       this.images = new XVideoResize("image");
@@ -5854,11 +5871,14 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.toggle = toggle;
       this.observer = new MutationObserver((records) => {
         if (records.every(isOwnedMutation)) return;
-        this.viewport?.reconcile();
-        this.timer ??= setTimeout(() => {
-          this.timer = void 0;
-          this.scan();
+        this.work?.render("posts", () => {
+          this.posts.reconcile();
+          this.viewport?.reconcile();
         }, 150);
+        this.work?.render("videos", () => this.videos?.reconcile(), 150);
+        this.work?.render("images", () => this.images?.reconcile(), 150);
+        this.work?.render("navigation", () => this.scanNavigation(), 150);
+        this.work?.render("ads", () => this.ads.reconcile(this.settings.xHideAds), 150);
       });
       this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "data-testid"] });
       document.addEventListener("keydown", this.exitPost, true);
@@ -5868,7 +5888,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     viewport;
     posts = new XPostModal();
     observer;
-    timer;
+    work;
     hidden = /* @__PURE__ */ new Set();
     ads = new XAds();
     toggle;
@@ -5894,6 +5914,10 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.videos?.reconcile();
       this.images?.reconcile();
       this.viewport?.reconcile();
+      this.scanNavigation();
+      this.ads.reconcile(this.settings.xHideAds);
+    }
+    scanNavigation() {
       const nav = document.querySelector('header[role="banner"] nav');
       const rail = nav?.parentElement;
       if (rail && nav && this.toggle && this.brand) {
@@ -5919,7 +5943,6 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           this.labels.add(node2);
         }
       }
-      this.ads.reconcile(this.settings.xHideAds);
       if (!this.settings.xHideFloatingIcons) {
         this.restoreIcons();
         return;
@@ -5969,7 +5992,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.images?.destroy();
       this.ads.destroy();
       this.observer?.disconnect();
-      clearTimeout(this.timer);
+      this.work?.destroy();
       this.restoreIcons();
       this.toggle?.remove();
       this.brand?.remove();

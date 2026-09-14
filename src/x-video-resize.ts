@@ -2,6 +2,7 @@ const DEFAULT_WIDTH = 420;
 
 export class XVideoResize {
   private roots = new Map<HTMLElement, HTMLElement>();
+  private parents = new WeakMap<HTMLElement, HTMLElement | null>();
   private cancelDrag: (() => void) | undefined;
   private width = DEFAULT_WIDTH;
   private contentListeners = new Map<HTMLElement, () => void>();
@@ -56,6 +57,9 @@ export class XVideoResize {
     const desired = new Set<HTMLElement>(mediaRoots);
     for (const player of mediaRoots ? [] : document.querySelectorAll<HTMLElement>(`[data-testid="primaryColumn"] article[data-testid="tweet"] :is(${selector})`)) {
       if (this.kind === 'image' && player.closest('[data-ft-video-resizable],[data-testid="videoComponent"],[data-testid="videoPlayer"]')) continue;
+      const known = player.closest<HTMLElement>(`[${this.attribute}]`);
+      if (known && this.roots.has(known) && this.parents.get(known) === known.parentElement
+        && (desired.has(known) || !containsPost(known))) { desired.add(known); continue; }
       let root = this.kind === 'video' ? player.closest<HTMLElement>('[data-testid="videoComponent"]') ?? player.parentElement : player.closest<HTMLAnchorElement>('a') ?? player;
       // A quoted post may itself be one large link. Keep its author and text outside the media root.
       if (root && containsPost(root)) root = player.parentElement;
@@ -131,7 +135,7 @@ export class XVideoResize {
         };
         controls.append(handle);
       }
-      root.append(controls); this.roots.set(root, controls);
+      root.append(controls); this.roots.set(root, controls); this.parents.set(root, root.parentElement);
       if (this.kind === 'video' && this.site === 'x') {
         const fit = (): void => this.fitContent(root);
         // Only external changes trigger fitting. Observing the player's dimensions

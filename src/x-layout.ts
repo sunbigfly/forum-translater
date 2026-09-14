@@ -4,6 +4,7 @@ import { isXSite, type Settings } from './settings';
 import { XAds } from './x-ads';
 import { XVideoResize } from './x-video-resize';
 import { isOwnedMutation } from './dom-mutations';
+import { ScrollIdleQueue } from './scroll-idle-queue';
 
 type LayoutSettings = Pick<Settings, 'xCollapseSidebar' | 'xHideFloatingIcons' | 'xHideRightSidebar' | 'xHideAds'>;
 const launchers = '[data-testid="GrokDrawer"],[data-testid="DMDrawer"],button[aria-label*="Grok"],[role="button"][aria-label*="Grok"],a[href="/i/grok"],[aria-label="Chat"],[aria-label="聊天"],[aria-label="Messages"],[aria-label="私信"]';
@@ -12,7 +13,7 @@ export class XLayout {
   private viewport: XPostViewport | undefined;
   private posts = new XPostModal();
   private observer: MutationObserver | undefined;
-  private timer: ReturnType<typeof setTimeout> | undefined;
+  private work: ScrollIdleQueue | undefined;
   private hidden = new Set<HTMLElement>();
   private ads = new XAds();
   private toggle: HTMLButtonElement | undefined;
@@ -24,6 +25,7 @@ export class XLayout {
   private images: XVideoResize | undefined;
   constructor(private settings: LayoutSettings, private readonly save: (collapsed: boolean) => void) {
     if (!isXSite()) return;
+    this.work = new ScrollIdleQueue();
     this.viewport = new XPostViewport();
     this.videos = new XVideoResize();
     this.images = new XVideoResize('image');
@@ -41,8 +43,12 @@ export class XLayout {
     this.toggle = toggle;
     this.observer = new MutationObserver(records => {
       if (records.every(isOwnedMutation)) return;
-      this.viewport?.reconcile();
-      this.timer ??= setTimeout(() => { this.timer = undefined; this.scan(); }, 150);
+      // Host hydration and player updates must not trigger full-feed scans mid-swipe.
+      this.work?.render('posts', () => { this.posts.reconcile(); this.viewport?.reconcile(); }, 150);
+      this.work?.render('videos', () => this.videos?.reconcile(), 150);
+      this.work?.render('images', () => this.images?.reconcile(), 150);
+      this.work?.render('navigation', () => this.scanNavigation(), 150);
+      this.work?.render('ads', () => this.ads.reconcile(this.settings.xHideAds), 150);
     });
     this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'data-testid'] });
     document.addEventListener('keydown', this.exitPost, true);
@@ -63,6 +69,10 @@ export class XLayout {
     this.videos?.reconcile();
     this.images?.reconcile();
     this.viewport?.reconcile();
+    this.scanNavigation();
+    this.ads.reconcile(this.settings.xHideAds);
+  }
+  private scanNavigation(): void {
     const nav = document.querySelector<HTMLElement>('header[role="banner"] nav');
     const rail = nav?.parentElement;
     if (rail && nav && this.toggle && this.brand) {
@@ -83,7 +93,6 @@ export class XLayout {
         if (!node.hasAttribute('data-ft-x-nav-label')) node.setAttribute('data-ft-x-nav-label', ''); this.labels.add(node);
       }
     }
-    this.ads.reconcile(this.settings.xHideAds);
     if (!this.settings.xHideFloatingIcons) { this.restoreIcons(); return; }
     for (const node of this.hidden) if (!node.isConnected) this.hidden.delete(node);
     // Verified host drawer roots use relative positioning and oversized wrappers.
@@ -126,7 +135,7 @@ export class XLayout {
     this.videos?.destroy();
     this.images?.destroy();
     this.ads.destroy();
-    this.observer?.disconnect(); clearTimeout(this.timer); this.restoreIcons(); this.toggle?.remove(); this.brand?.remove();
+    this.observer?.disconnect(); this.work?.destroy(); this.restoreIcons(); this.toggle?.remove(); this.brand?.remove();
     document.removeEventListener('keydown', this.exitPost, true);
     window.removeEventListener('popstate', this.onRoute);
     this.logo?.removeAttribute('data-ft-x-native-logo'); this.rail?.removeAttribute('data-ft-x-rail');
