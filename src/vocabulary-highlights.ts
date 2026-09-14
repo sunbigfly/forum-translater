@@ -1,6 +1,9 @@
 import type { VocabularyWord } from './vocabulary';
 
 const INK_COLORS = ['#e995ab', '#dfa65c', '#c6b953', '#71b68a', '#65b6c7', '#829de0', '#b18bd1'];
+function supportsWordPopup(): boolean {
+  return innerWidth > 700 && (typeof matchMedia !== 'function' || matchMedia('(hover: hover) and (pointer: fine)').matches);
+}
 export function applyVocabularyInk(mark: HTMLElement, index: number): void {
   const color = INK_COLORS[index % INK_COLORS.length] ?? INK_COLORS[0];
   const brush = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 16" preserveAspectRatio="none"><path d="M3 10 Q25 5 49 8 T97 6" fill="none" stroke="${color}" stroke-opacity=".24" stroke-width="8" stroke-linecap="round"/><path d="M5 12 Q40 9 65 11 T95 9" fill="none" stroke="${color}" stroke-opacity=".14" stroke-width="3" stroke-linecap="round"/></svg>`;
@@ -24,10 +27,13 @@ export class VocabularyHighlights {
   private roots = new Map<HTMLElement, HighlightRoot>();
   private dismiss: (() => void) | undefined;
   private popupAnchor: HTMLElement | undefined;
+  private words: VocabularyWord[] = [];
   constructor(private readonly show?: (anchor: HTMLElement, word: VocabularyWord) => () => void) {}
   apply(original: HTMLElement, translations: HTMLElement[], words: VocabularyWord[]): void {
+    this.words = words;
     if (!words.length) { this.clear(); return; }
-    const identities = words.map(word => JSON.stringify(word));
+    // Examples and pronunciation can stream independently without changing text matches.
+    const identities = words.map(word => JSON.stringify([word.word, word.meaning, word.translatedTerm]));
     const targets = new Map([[original, true], ...translations.map(root => [root, false] as const)]);
     for (const root of this.roots.keys()) if (!targets.has(root)) this.clearRoot(root);
     for (const [root, english] of targets) {
@@ -68,7 +74,7 @@ export class VocabularyHighlights {
     if (this.popupAnchor && state.marks.includes(this.popupAnchor)) {
       this.dismiss?.(); this.dismiss = undefined; this.popupAnchor = undefined;
     }
-    for (const mark of state.marks) mark.replaceWith(...mark.childNodes);
+    for (const mark of state.marks) mark.replaceWith(document.createTextNode(mark.textContent ?? ''));
     this.roots.delete(root);
   }
   private mark(root: HTMLElement, term: string, hint: string, english: boolean, word: VocabularyWord, index: number): HTMLElement[] {
@@ -83,20 +89,27 @@ export class VocabularyHighlights {
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const pattern = new RegExp(english ? `(?<![a-z])${escaped}(?![a-z])` : escaped, english ? 'gi' : 'g');
     for (const text of texts) {
-      for (const match of [...text.data.matchAll(pattern)].reverse()) {
+      const matches = [...text.data.matchAll(pattern)];
+      if (!matches.length) continue;
+      const fragment = document.createDocumentFragment(); let offset = 0;
+      for (const match of matches) {
         const start = match.index; const end = start + match[0].length;
-        if (end < text.length) text.splitText(end);
-        const selected = start ? text.splitText(start) : text;
-        const mark = document.createElement('span'); mark.dataset.ftWord = ''; mark.title = hint;
+        fragment.append(text.data.slice(offset, start));
+        const mark = document.createElement('span'); mark.dataset.ftWord = '';
+        if (supportsWordPopup()) mark.title = hint;
         applyVocabularyInk(mark, index);
-        if (this.show) {
+        if (this.show && supportsWordPopup()) {
           mark.removeAttribute('title'); mark.tabIndex = 0;
           mark.setAttribute('aria-label', `${word.word}：${word.meaning}`);
-          const open = (): void => { this.dismiss?.(); this.popupAnchor = mark; this.dismiss = this.show?.(mark, word); };
+          const open = (event: Event): void => {
+            if (!supportsWordPopup() || 'pointerType' in event && event.pointerType === 'touch') return;
+            this.dismiss?.(); this.popupAnchor = mark; this.dismiss = this.show?.(mark, this.words[index] ?? word);
+          };
           mark.addEventListener('pointerenter', open); mark.addEventListener('focus', open);
         }
-        selected.before(mark); mark.append(selected); marks.push(mark);
+        mark.textContent = match[0]; fragment.append(mark); marks.push(mark); offset = end;
       }
+      fragment.append(text.data.slice(offset)); text.replaceWith(fragment);
     }
     return marks;
   }

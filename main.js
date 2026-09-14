@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.9
+// @version      0.2.10
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -66,13 +66,13 @@
       return true;
     }).map(([element, kind]) => ({ element, kind }));
   }
-  function isReadable(element) {
+  function isReadable(element, checkLayout = true) {
     if (!element.isConnected || element.closest('[data-ft-duplicate],[hidden],[aria-hidden="true"],.collapsed,shreddit-comment[collapsed]:not([collapsed="false"]),shreddit-comment[aria-expanded="false"],details:not([open])')) return false;
-    return element.getClientRects().length > 0;
+    return !checkLayout || element.getClientRects().length > 0;
   }
   function sourceSnapshot(element, origins) {
     const result = element.ownerDocument.createElement("div");
-    const skip = `${EXCLUDE},[hidden],[aria-hidden="true"],script,style,button,select,form,svg,img,video,audio,iframe`;
+    const skip = `${EXCLUDE},[hidden],[aria-hidden="true"],script,style,button,select,form,svg,img,video,audio,iframe,[slot="post-media-container"],[slot="post-media"],[data-click-id="media"],shreddit-player,reddit-video-player,shreddit-gallery`;
     const allowed = /* @__PURE__ */ new Set(["p", "br", "ul", "ol", "li", "blockquote", "strong", "em", "b", "i", "s", "pre", "code", "kbd", "samp", "h1", "h2", "h3", "h4", "h5", "h6", "table", "tbody", "tr", "td", "th"]);
     function visit(node2, parent) {
       if (node2.nodeType === Node.TEXT_NODE) {
@@ -94,6 +94,7 @@
               const source = node2.cloneNode(true);
               source.querySelectorAll(OWNED).forEach((owned) => owned.remove());
               const label = (source.textContent || "").trim();
+              if (!label) return;
               clone.textContent = label;
               clone.setAttribute("title", url.href);
               parent.appendChild(clone);
@@ -114,6 +115,10 @@
       for (const child of node2.childNodes) visit(child, clone ?? parent);
     }
     for (const child of element.childNodes) visit(child, result);
+    for (const block of [...result.querySelectorAll("p,blockquote,ul,ol,h1,h2,h3,h4,h5,h6")].reverse()) {
+      if (!(block.textContent ?? "").trim() && !block.querySelector("pre,code,kbd,samp") && !block.closest("pre,code,kbd,samp")) block.remove();
+    }
+    while (result.lastChild && (result.lastChild instanceof Text && !result.lastChild.data.trim() || result.lastChild instanceof Element && result.lastChild.matches("br"))) result.lastChild.remove();
     return result;
   }
   function contentIdentity(element) {
@@ -800,6 +805,7 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
   function renderTranslationText(node2, translation, partial = false) {
     const plan = translationTextPlan(node2);
     if (partial) translation = translation.replace(/⟦[^⟧]*$/, "");
+    else translation = translation.trim();
     if (!partial && !translationProtectedTokensMatch(plan.text, translation)) return null;
     const counts = Array.from({ length: plan.protectedNodes.length }, () => 0);
     for (const match of translation.matchAll(PROTECTED_TOKEN_PATTERN)) {
@@ -2199,6 +2205,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
 
   // src/vocabulary-highlights.ts
   var INK_COLORS = ["#e995ab", "#dfa65c", "#c6b953", "#71b68a", "#65b6c7", "#829de0", "#b18bd1"];
+  function supportsWordPopup() {
+    return innerWidth > 700 && (typeof matchMedia !== "function" || matchMedia("(hover: hover) and (pointer: fine)").matches);
+  }
   function applyVocabularyInk(mark, index) {
     const color = INK_COLORS[index % INK_COLORS.length] ?? INK_COLORS[0];
     const brush = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 16" preserveAspectRatio="none"><path d="M3 10 Q25 5 49 8 T97 6" fill="none" stroke="${color}" stroke-opacity=".24" stroke-width="8" stroke-linecap="round"/><path d="M5 12 Q40 9 65 11 T95 9" fill="none" stroke="${color}" stroke-opacity=".14" stroke-width="3" stroke-linecap="round"/></svg>`;
@@ -2217,12 +2226,14 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     roots = /* @__PURE__ */ new Map();
     dismiss;
     popupAnchor;
+    words = [];
     apply(original2, translations, words2) {
+      this.words = words2;
       if (!words2.length) {
         this.clear();
         return;
       }
-      const identities = words2.map((word) => JSON.stringify(word));
+      const identities = words2.map((word) => JSON.stringify([word.word, word.meaning, word.translatedTerm]));
       const targets = new Map([[original2, true], ...translations.map((root) => [root, false])]);
       for (const root of this.roots.keys()) if (!targets.has(root)) this.clearRoot(root);
       for (const [root, english] of targets) {
@@ -2264,7 +2275,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         this.dismiss = void 0;
         this.popupAnchor = void 0;
       }
-      for (const mark of state.marks) mark.replaceWith(...mark.childNodes);
+      for (const mark of state.marks) mark.replaceWith(document.createTextNode(mark.textContent ?? ""));
       this.roots.delete(root);
     }
     mark(root, term, hint, english, word, index) {
@@ -2280,31 +2291,38 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const pattern = new RegExp(english ? `(?<![a-z])${escaped}(?![a-z])` : escaped, english ? "gi" : "g");
       for (const text2 of texts) {
-        for (const match of [...text2.data.matchAll(pattern)].reverse()) {
+        const matches = [...text2.data.matchAll(pattern)];
+        if (!matches.length) continue;
+        const fragment = document.createDocumentFragment();
+        let offset = 0;
+        for (const match of matches) {
           const start = match.index;
           const end = start + match[0].length;
-          if (end < text2.length) text2.splitText(end);
-          const selected = start ? text2.splitText(start) : text2;
+          fragment.append(text2.data.slice(offset, start));
           const mark = document.createElement("span");
           mark.dataset.ftWord = "";
-          mark.title = hint;
+          if (supportsWordPopup()) mark.title = hint;
           applyVocabularyInk(mark, index);
-          if (this.show) {
+          if (this.show && supportsWordPopup()) {
             mark.removeAttribute("title");
             mark.tabIndex = 0;
             mark.setAttribute("aria-label", `${word.word}：${word.meaning}`);
-            const open = () => {
+            const open = (event) => {
+              if (!supportsWordPopup() || "pointerType" in event && event.pointerType === "touch") return;
               this.dismiss?.();
               this.popupAnchor = mark;
-              this.dismiss = this.show?.(mark, word);
+              this.dismiss = this.show?.(mark, this.words[index] ?? word);
             };
             mark.addEventListener("pointerenter", open);
             mark.addEventListener("focus", open);
           }
-          selected.before(mark);
-          mark.append(selected);
+          mark.textContent = match[0];
+          fragment.append(mark);
           marks.push(mark);
+          offset = end;
         }
+        fragment.append(text2.data.slice(offset));
+        text2.replaceWith(fragment);
       }
       return marks;
     }
@@ -2602,6 +2620,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           displayed = 0;
         }
         displayedWords = identities;
+        const savedWords = new Set(result.length > displayed ? readWordbook().map((item) => item.word.toLowerCase()) : []);
         for (const [index, word] of result.entries()) {
           if (index < displayed) continue;
           const card = document.createElement("div");
@@ -2660,7 +2679,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
           pronunciation.setAttribute("aria-label", `音标 ${word.ipa}`);
           pronunciation.hidden = !word.ipa.trim();
           card.append(row, example);
-          const saved = readWordbook().some((item) => item.word.toLowerCase() === word.word.toLowerCase());
+          const saved = savedWords.has(word.word.toLowerCase());
           const add = button("", () => {
             try {
               saveWord(word, sourceUrl);
@@ -2693,7 +2712,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         } else more.remove();
         host.hidden = result.length === 0;
         currentWords = result;
-        refreshHighlights();
+        service.worker.render(highlightOwner, refreshHighlights, 120);
       };
       const fill = (result) => {
         service.worker.render(paintOwner, () => paint(result));
@@ -4059,6 +4078,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     if (target?.closest("[data-ft-owned]")) return true;
     if (record3.type !== "childList") return false;
     const changed = [...record3.addedNodes, ...record3.removedNodes];
+    if (changed.some((node2) => node2 instanceof Element && node2.matches("[data-ft-word]")) && changed.every((node2) => node2 instanceof Text || node2 instanceof Element && node2.matches("[data-ft-word]")) && [...record3.addedNodes].map((node2) => node2.textContent ?? "").join("") === [...record3.removedNodes].map((node2) => node2.textContent ?? "").join("")) return true;
     return changed.length > 0 && changed.every((node2) => node2 instanceof Element && node2.matches("[data-ft-owned]"));
   }
 
@@ -4177,7 +4197,11 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       this.service.worker.render("reconcile", () => this.reconcile(), 16);
     }
     updateForeground() {
-      const first = [...this.entries.values()].filter((entry) => entry.visible && (entry.state === "idle" || entry.state === "loading") && !isXPostBackground(entry.element) && isReadable(entry.element)).sort((a2, b) => a2.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top)[0];
+      let first;
+      for (const entry of this.entries.values()) {
+        if (!entry.visible || entry.state !== "idle" && entry.state !== "loading" || isXPostBackground(entry.element) || !isReadable(entry.element, false)) continue;
+        if (!first || first.element.compareDocumentPosition(entry.element) & Node.DOCUMENT_POSITION_PRECEDING) first = entry;
+      }
       this.service.setForeground(first?.owner);
     }
     remove(entry) {

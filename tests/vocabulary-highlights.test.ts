@@ -2,6 +2,40 @@
 import { expect, it, vi } from 'vitest';
 import { VocabularyHighlights } from '../src/vocabulary-highlights';
 import { sourceSnapshot } from '../src/reddit';
+import { isOwnedMutation } from '../src/dom-mutations';
+
+it('keeps mobile highlights without opening hover or focus cards', () => {
+  vi.stubGlobal('innerWidth', 390);
+  const root = document.createElement('p'); root.textContent = 'substantial effort'; document.body.append(root);
+  const show = vi.fn(() => () => undefined); const highlights = new VocabularyHighlights(show);
+  try {
+    highlights.apply(root, [], [{ word: 'substantial', ipa: '', meaning: '大量的', example: '', level: 'CET6' }]);
+    const mark = root.querySelector<HTMLElement>('[data-ft-word]');
+    expect(mark?.textContent).toBe('substantial');
+    mark?.dispatchEvent(new Event('pointerenter')); mark?.dispatchEvent(new Event('focus'));
+    expect(show).not.toHaveBeenCalled(); expect(mark?.hasAttribute('tabindex')).toBe(false);
+    expect(mark?.hasAttribute('title')).toBe(false);
+  } finally { highlights.clear(); root.remove(); vi.unstubAllGlobals(); }
+});
+
+it('does not rescan the page for highlight insertion or removal but retains real source edits', () => {
+  const root = document.createElement('p'); root.textContent = 'substantial effort'; document.body.append(root);
+  const observer = new MutationObserver(() => undefined);
+  observer.observe(root, { childList: true, subtree: true, characterData: true });
+  const highlights = new VocabularyHighlights();
+  const word = { word: 'substantial', ipa: '', meaning: '大量的', example: '', level: 'CET6' as const };
+  try {
+    highlights.apply(root, [], [word]);
+    const records = observer.takeRecords();
+    expect(records.length).toBeGreaterThan(0); expect(records.every(isOwnedMutation)).toBe(true);
+    const mark = root.querySelector('[data-ft-word]');
+    highlights.apply(root, [], [{ ...word, example: 'Updated example.' }]);
+    expect(root.querySelector('[data-ft-word]')).toBe(mark); expect(observer.takeRecords()).toHaveLength(0);
+    highlights.clear(); expect(observer.takeRecords().every(isOwnedMutation)).toBe(true);
+    root.textContent = 'Changed source';
+    expect(observer.takeRecords().some(record => !isOwnedMutation(record))).toBe(true);
+  } finally { observer.disconnect(); highlights.clear(); root.remove(); }
+});
 
 it('keeps original highlights and their popup while nested translations stream and complete', () => {
   const original = document.createElement('div'); original.textContent = 'substantial effort';

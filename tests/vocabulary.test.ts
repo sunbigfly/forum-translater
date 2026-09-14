@@ -30,7 +30,7 @@ it('avoids highlighting streamed fragments and retains source marks without anot
   try {
     await vi.advanceTimersByTimeAsync(0);
     publish?.([{ ...word, word: 'substantial', level: 'CET6', translatedTerm: '丰盛' }]);
-    await vi.advanceTimersByTimeAsync(80);
+    await vi.advanceTimersByTimeAsync(200);
     const sourceMark = original.querySelector('[data-ft-word]'); expect(sourceMark).not.toBeNull();
     scan.mockClear();
     translated.setAttribute('data-ft-streaming', '');
@@ -92,6 +92,7 @@ it('shows only three compact words and expands examples and remaining words on d
   try {
     const shadow = document.querySelector('[data-ft-owned="learning"]')?.shadowRoot;
     await vi.waitFor(() => expect(shadow?.querySelectorAll('.word-row')).toHaveLength(4));
+    await vi.waitFor(() => expect(original.querySelector('[data-ft-word]')).not.toBeNull());
     const marked = original.querySelector('[data-ft-word]'); marked?.dispatchEvent(new Event('pointerenter'));
     const popup = document.querySelector('[data-ft-owned="word-popup"]')?.shadowRoot;
     expect(popup?.textContent).toContain('This is substantial.');
@@ -246,7 +247,7 @@ it('refreshes corrected vocabulary at the same count and reapplies marks after o
     await vi.waitFor(() => expect(shadow?.querySelector('.word')?.textContent).toBe('coherent'));
     expect(shadow?.querySelectorAll('.word-row')).toHaveLength(1);
     expect(shadow?.querySelector('.word')?.textContent).toBe('coherent');
-    expect(original.querySelector('[data-ft-word]')?.textContent).toBe('coherent');
+    await vi.waitFor(() => expect(original.querySelector('[data-ft-word]')?.textContent).toBe('coherent'));
     expect(translated.querySelector('[data-ft-word]')?.textContent).toBe('连贯的');
     shadow?.querySelector<HTMLButtonElement>('.word')?.click();
     publish?.([{ ...revised, translatedTerm: '协调的', memoryMeaning: '更新后的例句译文。' }]);
@@ -258,6 +259,7 @@ it('refreshes corrected vocabulary at the same count and reapplies marks after o
     await vi.waitFor(() => expect(original.querySelector('[data-ft-word]')?.textContent).toBe('COHERENT'));
     publish?.([]);
     await vi.waitFor(() => expect(shadow?.querySelectorAll('.word-row')).toHaveLength(0));
+    await vi.waitFor(() => expect(original.querySelector('[data-ft-word]')).toBeNull());
     expect(original.querySelector('[data-ft-word]')).toBeNull(); expect(translated.querySelector('[data-ft-word]')).toBeNull();
     expect(shadow?.querySelectorAll('.word-row')).toHaveLength(0);
   } finally { destroy(); watch.mockRestore(); service.destroy(); }

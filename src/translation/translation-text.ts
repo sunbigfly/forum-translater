@@ -290,6 +290,7 @@ export function translationProtectedTokensMatch(source: string, translation: str
 export function renderTranslationText(node: Element, translation: string, partial = false): DocumentFragment | null {
   const plan = translationTextPlan(node);
   if (partial) translation = translation.replace(/⟦[^⟧]*$/, '');
+  else translation = translation.trim();
   if (!partial && !translationProtectedTokensMatch(plan.text, translation)) return null;
   const counts = Array.from({ length: plan.protectedNodes.length }, () => 0);
   for (const match of translation.matchAll(PROTECTED_TOKEN_PATTERN)) {

@@ -3,7 +3,7 @@
   <strong>读懂 Reddit 与 X，顺手积累进阶词汇</strong>
   <br><br>
   <a href="https://greasyfork.org/zh-CN/scripts/594954"><img alt="安装脚本" src="https://img.shields.io/badge/Userscript-安装脚本-536af5"></a>
-  <img alt="版本" src="https://img.shields.io/badge/version-0.2.9-536af5">
+  <img alt="版本" src="https://img.shields.io/badge/version-0.2.10-536af5">
   <a href="LICENSE"><img alt="许可证" src="https://img.shields.io/badge/license-MIT-f5de53"></a>
 </div>
 
@@ -56,6 +56,8 @@ Reddit 帖子媒体区也支持悬停显示四边手柄、拖动等比缩放和�
 移动端与触屏设备的媒体自动适应帖子宽度，隐藏缩放手柄并保留桌面尺寸设置。滚动或触摸期间暂缓译文、词汇卡片和高亮更新，已有网络请求继续执行，滚动停止后展示最新结果。
 
 X 动态内容引发的帖子、媒体、导航和广告扫描也在滚动停止后分批执行，复用已识别的媒体容器，减少重复扫描。
+
+词汇高亮更新避免触发页面重扫，例句更新复用已有标记；移动端和触屏保留高亮但不弹出悬停词卡。译文过滤媒体留下的空白容器，并清理完整译文的首尾空白。
 
 Reddit 信息流自动隐藏带有推广标记或作者栏广告标签的广告帖子，包括滚动加载的广告；正文中提及广告不触发隐藏。
 

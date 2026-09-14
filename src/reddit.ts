@@ -30,14 +30,14 @@ export function discover(root: ParentNode): Candidate[] {
   })
     .map(([element, kind]) => ({ element, kind }));
 }
-export function isReadable(element: HTMLElement): boolean {
+export function isReadable(element: HTMLElement, checkLayout = true): boolean {
   if (!element.isConnected || element.closest('[data-ft-duplicate],[hidden],[aria-hidden="true"],.collapsed,shreddit-comment[collapsed]:not([collapsed="false"]),shreddit-comment[aria-expanded="false"],details:not([open])')) return false;
-  return element.getClientRects().length > 0;
+  return !checkLayout || element.getClientRects().length > 0;
 }
 // Clone through an allowlist: never copy host handlers, custom elements, IDs or interactive controls.
 export function sourceSnapshot(element: HTMLElement, origins?: Map<Node, HTMLElement>): HTMLDivElement {
   const result = element.ownerDocument.createElement('div');
-  const skip = `${EXCLUDE},[hidden],[aria-hidden="true"],script,style,button,select,form,svg,img,video,audio,iframe`;
+  const skip = `${EXCLUDE},[hidden],[aria-hidden="true"],script,style,button,select,form,svg,img,video,audio,iframe,[slot="post-media-container"],[slot="post-media"],[data-click-id="media"],shreddit-player,reddit-video-player,shreddit-gallery`;
   const allowed = new Set(['p', 'br', 'ul', 'ol', 'li', 'blockquote', 'strong', 'em', 'b', 'i', 's', 'pre', 'code', 'kbd', 'samp', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'tbody', 'tr', 'td', 'th']);
   function visit(node: Node, parent: Node): void {
     if (node.nodeType === Node.TEXT_NODE) { parent.appendChild(element.ownerDocument.createTextNode(node.textContent ?? '')); return; }
@@ -56,6 +56,8 @@ export function sourceSnapshot(element: HTMLElement, origins?: Map<Node, HTMLEle
             const source = node.cloneNode(true) as Element;
             source.querySelectorAll(OWNED).forEach(owned => owned.remove());
             const label = (source.textContent || '').trim();
+            // Image-only links have no translatable label and leave an empty card.
+            if (!label) return;
             clone.textContent = label;
             clone.setAttribute('title', url.href);
             parent.appendChild(clone);
@@ -75,6 +77,13 @@ export function sourceSnapshot(element: HTMLElement, origins?: Map<Node, HTMLEle
     for (const child of node.childNodes) visit(child, clone ?? parent);
   }
   for (const child of element.childNodes) visit(child, result);
+  // Media is deliberately omitted above; discard its now-empty paragraph/list
+  // wrappers too, before section paths and translation placeholders are created.
+  for (const block of [...result.querySelectorAll('p,blockquote,ul,ol,h1,h2,h3,h4,h5,h6')].reverse()) {
+    if (!(block.textContent ?? '').trim() && !block.querySelector('pre,code,kbd,samp') && !block.closest('pre,code,kbd,samp')) block.remove();
+  }
+  while (result.lastChild && (result.lastChild instanceof Text && !result.lastChild.data.trim()
+    || result.lastChild instanceof Element && result.lastChild.matches('br'))) result.lastChild.remove();
   return result;
 }
 export function contentIdentity(element: HTMLElement): string {

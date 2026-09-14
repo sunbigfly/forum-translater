@@ -117,9 +117,14 @@ export class RedditRuntime {
   };
   private schedule(): void { this.service.worker.render('reconcile', () => this.reconcile(), 16); }
   private updateForeground(): void {
-    const first = [...this.entries.values()].filter(entry => entry.visible && (entry.state === 'idle' || entry.state === 'loading')
-      && !isXPostBackground(entry.element) && isReadable(entry.element))
-      .sort((a, b) => a.element.getBoundingClientRect().top - b.element.getBoundingClientRect().top)[0];
+    // IntersectionObserver already supplies visibility. Reading rects while sorting
+    // every visible post can force layout during a swipe, especially inside dialogs.
+    let first: Entry | undefined;
+    for (const entry of this.entries.values()) {
+      if (!entry.visible || entry.state !== 'idle' && entry.state !== 'loading'
+        || isXPostBackground(entry.element) || !isReadable(entry.element, false)) continue;
+      if (!first || first.element.compareDocumentPosition(entry.element) & Node.DOCUMENT_POSITION_PRECEDING) first = entry;
+    }
     this.service.setForeground(first?.owner);
   }
   private remove(entry: Entry): void {

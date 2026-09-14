@@ -185,6 +185,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       const append = displayedWords.length <= identities.length && displayedWords.every((value, index) => value === identities[index]);
       if (!append) { stopWordSpeech(shadow); cards.replaceChildren(); displayed = 0; }
       displayedWords = identities;
+      const savedWords = new Set(result.length > displayed ? readWordbook().map(item => item.word.toLowerCase()) : []);
       for (const [index, word] of result.entries()) {
         if (index < displayed) continue;
         const card = document.createElement('div'); card.hidden = !expanded && index >= 3;
@@ -215,7 +216,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
         const meaning = document.createElement('span'); meaning.className = 'meaning'; meaning.textContent = word.meaning; meaning.title = word.meaning;
         const pronunciation = document.createElement('span'); pronunciation.className = 'ipa'; pronunciation.textContent = word.ipa; pronunciation.title = word.ipa; pronunciation.setAttribute('aria-label', `音标 ${word.ipa}`); pronunciation.hidden = !word.ipa.trim();
         card.append(row, example);
-        const saved = readWordbook().some(item => item.word.toLowerCase() === word.word.toLowerCase());
+        const saved = savedWords.has(word.word.toLowerCase());
         const add = button('', () => {
           try { saveWord(word, sourceUrl); add.setAttribute('aria-pressed', 'true'); add.title = '已收藏'; add.setAttribute('aria-label', `${word.word} 已收藏`); } catch (error) { status.textContent = error instanceof Error ? error.message : '收藏失败'; }
         }); add.className = 'icon ft-bookmark'; add.title = saved ? '已收藏' : '加入单词本'; add.setAttribute('aria-label', `${saved ? '已收藏' : '收藏'} ${word.word}`); add.setAttribute('aria-pressed', String(saved));
@@ -228,7 +229,7 @@ export function mountVocabulary(anchor: HTMLElement, source: string, sourceUrl: 
       if (displayed > 3) { more.textContent = expanded ? '收起' : `展开其余 ${displayed - 3} 词`; if (!more.isConnected) actions.append(more); }
       else more.remove();
       host.hidden = result.length === 0;
-      currentWords = result; refreshHighlights();
+      currentWords = result; service.worker.render(highlightOwner, refreshHighlights, 120);
     };
     const fill = (result: VocabularyWord[]): void => { service.worker.render(paintOwner, () => paint(result)); };
     try {

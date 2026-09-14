@@ -2,6 +2,19 @@
 
 import { describe, expect, it } from "vitest";
 import { renderBilingualSections, renderTranslationSections, renderTranslationText, TranslationSectionsRenderer, translationBlockNeedsTranslation, translationProtectedTokensMatch, translationSectionPlans, translationTextPlan } from "../src/translation/translation-text";
+import { sourceSnapshot } from '../src/reddit';
+
+it('omits empty media wrappers and trailing translation lines without changing the source media or internal line breaks', () => {
+  const source = document.createElement('div');
+  source.innerHTML = '<p>Hello world</p><p><a href="https://example.com/image"><img src="image.jpg"></a></p><p><br><br></p><div slot="post-media-container"><a href="https://example.com">Media preview</a><video></video></div><br>\n\n';
+  const original = source.innerHTML;
+  const snapshot = sourceSnapshot(source);
+  expect(snapshot.innerHTML).toBe('<p>Hello world</p>');
+  const output = document.createElement('div'); const renderer = new TranslationSectionsRenderer(snapshot, output);
+  renderer.render(new Map([[0, '\n你好\n世界\n\n\n']]), { pending: new Set(), streaming: new Set(), failed: new Set() });
+  expect(output.innerHTML).toBe('<p>你好\n世界</p>');
+  expect(source.innerHTML).toBe(original);
+});
 
 it('preserves other sections and placeholders through streaming, completion and retry', () => {
   const source = document.createElement('div'); source.innerHTML = '<p>First paragraph</p><p>Second paragraph <a href="https://example.com">link</a></p>';
