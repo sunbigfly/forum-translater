@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { discover, sourceSnapshot } from '../src/reddit';
+import { contentIdentity, discover, sourceSnapshot } from '../src/reddit';
 import { translationSectionPlans } from '../src/translation/translation-text';
 import { normalizeSettings } from '../src/settings';
 
@@ -27,6 +27,20 @@ describe('Reddit content owners', () => {
   it('supports old Reddit without collecting nested replies twice', () => {
     document.body.innerHTML = `<div class="thing link"><div class="entry"><a class="title">Title</a><div class="usertext-body"><div class="md">Body</div></div></div></div><div class="thing comment"><div class="entry"><div class="usertext-body"><div class="md">Comment</div></div></div></div>`;
     expect(discover(document).map(item => item.kind)).toEqual(['title', 'body', 'comment']);
+  });
+  it('finds current Reddit search result titles and previews without the full-card accessibility link', () => {
+    document.body.innerHTML = `<div data-testid="search-post-with-content-preview">
+      <h2><a data-testid="post-title" href="/r/test/comments/abc/search-result/"><span>Search result title</span></a></h2>
+      <div data-testid="sdui-post-unit">
+        <search-telemetry-tracker><a data-testid="post-title-text" href="/r/test/comments/abc/search-result/">Search result title</a></search-telemetry-tracker>
+        <search-telemetry-tracker><a href="/r/test/comments/abc/search-result/">A sufficiently detailed search result preview.</a></search-telemetry-tracker>
+      </div>
+    </div>`;
+    const candidates = discover(document);
+    expect(candidates.map(item => [item.kind, item.element.textContent])).toEqual([
+      ['title', 'Search result title'], ['body', 'A sufficiently detailed search result preview.'],
+    ]);
+    expect(candidates.map(item => contentIdentity(item.element))).toEqual(['t3_abc', 't3_abc']);
   });
   it('sanitizes copied structure and preserves original media and links', () => {
     const source = document.createElement('div');

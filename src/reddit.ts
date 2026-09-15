@@ -4,11 +4,13 @@ const X_ARTICLE = '[data-testid="twitterArticleRichTextView"],[data-testid="long
 const X_ARTICLE_BLOCK = '[data-block="true"],p,h1,h2,h3,h4,h5,h6,li,blockquote';
 const RULES: ReadonlyArray<readonly [Kind, string]> = [
   ['title', 'shreddit-post [slot="title"], shreddit-post h1, .thing.link > .entry a.title, [data-testid="post-container"] [data-adclicklocation="title"] h3'],
+  ['title', '[data-testid="search-post-with-content-preview"] [data-testid="post-title-text"]'],
   ['title', '[data-testid="twitterArticleTitle"], [data-testid="twitter-article-title"]'],
   // Observe article blocks separately: a whole-article owner starts every
   // paragraph at once and rebuilds the entire document on each partial result.
   ['body', `[data-testid="tweetText"], :is(${X_ARTICLE}) :is(${X_ARTICLE_BLOCK}), :is(${X_ARTICLE}):not(:has(:is(${X_ARTICLE_BLOCK})))`],
   ['body', 'shreddit-post [slot="text-body"], shreddit-post [id$="-post-rtjson-content"], .thing.link > .entry .usertext-body > .md, [data-testid="post-container"] [data-click-id="text"]'],
+  ['body', '[data-testid="search-post-with-content-preview"] [data-testid="sdui-post-unit"] > search-telemetry-tracker > a:not([data-testid])'],
   ['comment', 'shreddit-comment [slot="comment"], .thing.comment > .entry .usertext-body > .md, [data-testid="comment"]'],
 ];
 const EXCLUDE = `${OWNED},[data-image-insight-host],textarea,input,[contenteditable]:not([contenteditable="false"]),[slot="credit-bar"],shreddit-ad-post`;
@@ -101,6 +103,10 @@ export function contentIdentity(element: HTMLElement): string {
     const id = /^\/[^/]+\/(?:status|article)\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1];
     if (id) return `x:status:${id}`;
   }
-  const owner = element.closest('shreddit-comment,shreddit-post,.thing,[data-testid="post-container"],[data-testid="comment"]');
-  return owner?.getAttribute('thingid') ?? owner?.getAttribute('post-id') ?? owner?.getAttribute('id') ?? '';
+  const owner = element.closest('shreddit-comment,shreddit-post,.thing,[data-testid="post-container"],[data-testid="search-post-with-content-preview"],[data-testid="comment"]');
+  const identity = owner?.getAttribute('thingid') ?? owner?.getAttribute('post-id') ?? owner?.getAttribute('id');
+  if (identity) return identity;
+  const href = owner?.querySelector('[data-testid="post-title-text"]')?.getAttribute('href') ?? '';
+  const id = /\/comments\/([a-z0-9]+)(?:[/?#]|$)/i.exec(href)?.[1];
+  return id ? `t3_${id}` : '';
 }

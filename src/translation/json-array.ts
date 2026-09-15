@@ -1,15 +1,32 @@
-/** Read completed objects from an unfinished JSON array without repairing model output. */
-export function completedArrayObjects(source: string): unknown[] {
-  if (!source.trimStart().startsWith('[')) return [];
-  const result: unknown[] = []; let depth = 0; let start = -1; let quoted = false; let escaped = false;
-  for (let index = source.indexOf('[') + 1; index < source.length; index++) {
-    const char = source[index];
-    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
-    if (char === '"') { quoted = true; continue; }
-    if (char === '{') { if (depth++ === 0) start = index; }
-    else if (char === '}' && depth > 0 && --depth === 0) {
-      try { result.push(JSON.parse(source.slice(start, index + 1)) as unknown); } catch { return result; }
+/** Scan only appended text; completed objects are parsed once, not on every token. */
+export class JsonArrayStream {
+  private source = '';
+  private cursor = 0;
+  private opened = false;
+  private stopped = false;
+  private depth = 0;
+  private start = -1;
+  private quoted = false;
+  private escaped = false;
+  private objects: unknown[] = [];
+  push(chunk: string): readonly unknown[] {
+    if (this.stopped) return this.objects;
+    this.source += chunk;
+    for (; this.cursor < this.source.length; this.cursor++) {
+      const char = this.source[this.cursor];
+      if (!this.opened) {
+        if (/\s/.test(char ?? '')) continue;
+        if (char !== '[') { this.stopped = true; break; }
+        this.opened = true; continue;
+      }
+      if (this.quoted) { if (this.escaped) this.escaped = false; else if (char === '\\') this.escaped = true; else if (char === '"') this.quoted = false; continue; }
+      if (char === '"') { this.quoted = true; continue; }
+      if (char === '{') { if (this.depth++ === 0) this.start = this.cursor; }
+      else if (char === '}' && this.depth > 0 && --this.depth === 0) {
+        try { this.objects.push(JSON.parse(this.source.slice(this.start, this.cursor + 1)) as unknown); }
+        catch { this.stopped = true; break; }
+      } else if (char === ']' && this.depth === 0) { this.stopped = true; break; }
     }
+    return this.objects;
   }
-  return result;
 }

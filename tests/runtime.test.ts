@@ -177,6 +177,23 @@ it('starts vocabulary once while body translation is pending and removes it on t
   Observer.instances[0]?.emit(body); await settle(); expect(collect).toHaveBeenCalledOnce();
   runtime.destroy(); expect(document.querySelector('[data-ft-owned="learning"]')).toBeNull();
 });
+it('shows vocabulary and highlights both sides of a translated Reddit comment', async () => {
+  document.body.innerHTML = '<shreddit-comment><div slot="comment"><p>A substantial effort changed the outcome.</p></div></shreddit-comment>';
+  service.destroy();
+  service = new TranslationService({ ...DEFAULTS, enabled: true, provider: 'ai', ai: { ...DEFAULTS.ai, baseUrl: 'https://example.com', apiKey: 'test', model: 'test' } }, new TranslationCache());
+  vi.spyOn(service, 'section').mockResolvedValue('大量的努力改变了结果。');
+  const word = { word: 'substantial', ipa: '/səbˈstænʃəl/', meaning: '大量的', example: 'A substantial effort changed the outcome.', level: 'CET6' as const, translatedTerm: '大量的' };
+  const watch = vi.spyOn(service, 'watchVocabulary').mockImplementation((_source, fill) => { fill([word]); return () => undefined; });
+  runtime = new RedditRuntime(service.settings, service);
+  const comment = document.querySelector<HTMLElement>('[slot="comment"]'); if (!comment) throw new Error('Missing comment');
+  Observer.instances[1]?.emit(comment); await vi.advanceTimersByTimeAsync(500);
+  const learning = document.querySelector<HTMLElement>('[data-ft-owned="learning"]');
+  expect(watch).toHaveBeenCalledOnce();
+  expect(learning?.hidden).toBe(false);
+  expect(learning?.shadowRoot?.querySelector('.word')?.textContent).toBe('substantial');
+  expect(comment.querySelector('[data-ft-word]')?.textContent).toBe('substantial');
+  expect(comment.parentElement?.querySelector('[data-ft-owned="translation"] [data-ft-word]')?.textContent).toBe('大量的');
+});
 describe('viewport translation lifecycle', () => {
   it('moves foreground priority to the next unfinished visible post as soon as the first completes', async () => {
     document.body.innerHTML = '<shreddit-post id="one"><div slot="text-body">First visible post</div></shreddit-post><shreddit-post id="two"><div slot="text-body">Second visible post</div></shreddit-post>';

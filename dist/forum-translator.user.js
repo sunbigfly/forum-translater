@@ -3,7 +3,7 @@
 // @name:en      Forum Translator
 // @description:en Translate Reddit and X paragraph by paragraph, learn advanced vocabulary, and resize media proportionally.
 // @namespace    sunbigfly/forum-translater
-// @version      0.2.10
+// @version      0.2.11
 // @description  逐段翻译 Reddit 与 X，提取六级及以上词汇，支持流式译文、单词收藏和 X 图片视频等比缩放。
 // @homepageURL  https://github.com/sunbigfly/forum-translater
 // @supportURL   https://github.com/sunbigfly/forum-translater/issues
@@ -41,11 +41,13 @@
   var X_ARTICLE_BLOCK = '[data-block="true"],p,h1,h2,h3,h4,h5,h6,li,blockquote';
   var RULES = [
     ["title", 'shreddit-post [slot="title"], shreddit-post h1, .thing.link > .entry a.title, [data-testid="post-container"] [data-adclicklocation="title"] h3'],
+    ["title", '[data-testid="search-post-with-content-preview"] [data-testid="post-title-text"]'],
     ["title", '[data-testid="twitterArticleTitle"], [data-testid="twitter-article-title"]'],
     // Observe article blocks separately: a whole-article owner starts every
     // paragraph at once and rebuilds the entire document on each partial result.
     ["body", `[data-testid="tweetText"], :is(${X_ARTICLE}) :is(${X_ARTICLE_BLOCK}), :is(${X_ARTICLE}):not(:has(:is(${X_ARTICLE_BLOCK})))`],
     ["body", 'shreddit-post [slot="text-body"], shreddit-post [id$="-post-rtjson-content"], .thing.link > .entry .usertext-body > .md, [data-testid="post-container"] [data-click-id="text"]'],
+    ["body", '[data-testid="search-post-with-content-preview"] [data-testid="sdui-post-unit"] > search-telemetry-tracker > a:not([data-testid])'],
     ["comment", 'shreddit-comment [slot="comment"], .thing.comment > .entry .usertext-body > .md, [data-testid="comment"]']
   ];
   var EXCLUDE = `${OWNED},[data-image-insight-host],textarea,input,[contenteditable]:not([contenteditable="false"]),[slot="credit-bar"],shreddit-ad-post`;
@@ -124,17 +126,21 @@
   function contentIdentity(element) {
     const tweet = element.closest('article[data-testid="tweet"]');
     if (tweet) {
-      const href = tweet.querySelector("time")?.closest("a")?.getAttribute("href") ?? "";
-      const id = /\/status\/(\d+)(?:[/?#]|$)/.exec(href)?.[1];
-      if (id) return `x:status:${id}`;
-      if (href) return href;
+      const href2 = tweet.querySelector("time")?.closest("a")?.getAttribute("href") ?? "";
+      const id2 = /\/status\/(\d+)(?:[/?#]|$)/.exec(href2)?.[1];
+      if (id2) return `x:status:${id2}`;
+      if (href2) return href2;
     }
     if (element.closest('[data-testid="twitterArticleReadView"],[data-testid="twitterArticleTitle"],[data-testid="twitter-article-title"],[data-testid="twitterArticleRichTextView"],[data-testid="longformRichTextComponent"]') && /(^|\.)(x|twitter)\.com$/.test(location.hostname)) {
-      const id = /^\/[^/]+\/(?:status|article)\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1];
-      if (id) return `x:status:${id}`;
+      const id2 = /^\/[^/]+\/(?:status|article)\/(\d+)(?:\/|$)/.exec(location.pathname)?.[1];
+      if (id2) return `x:status:${id2}`;
     }
-    const owner = element.closest('shreddit-comment,shreddit-post,.thing,[data-testid="post-container"],[data-testid="comment"]');
-    return owner?.getAttribute("thingid") ?? owner?.getAttribute("post-id") ?? owner?.getAttribute("id") ?? "";
+    const owner = element.closest('shreddit-comment,shreddit-post,.thing,[data-testid="post-container"],[data-testid="search-post-with-content-preview"],[data-testid="comment"]');
+    const identity = owner?.getAttribute("thingid") ?? owner?.getAttribute("post-id") ?? owner?.getAttribute("id");
+    if (identity) return identity;
+    const href = owner?.querySelector('[data-testid="post-title-text"]')?.getAttribute("href") ?? "";
+    const id = /\/comments\/([a-z0-9]+)(?:[/?#]|$)/i.exec(href)?.[1];
+    return id ? `t3_${id}` : "";
   }
 
   // src/fonts.ts
@@ -617,37 +623,57 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
 格式示意：{"section_0":"译文","vocabulary":[{"section":"section_0","word":"...","ipa":"/.../","meaning":"...","level":"CET6","translatedTerm":"...","memoryExample":"...","memoryMeaning":"...","memoryTerm":"..."}]}。示意中的省略号不是实际内容。`;
 
   // src/translation/json-array.ts
-  function completedArrayObjects(source) {
-    if (!source.trimStart().startsWith("[")) return [];
-    const result = [];
-    let depth = 0;
-    let start = -1;
-    let quoted = false;
-    let escaped = false;
-    for (let index = source.indexOf("[") + 1; index < source.length; index++) {
-      const char = source[index];
-      if (quoted) {
-        if (escaped) escaped = false;
-        else if (char === "\\") escaped = true;
-        else if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') {
-        quoted = true;
-        continue;
-      }
-      if (char === "{") {
-        if (depth++ === 0) start = index;
-      } else if (char === "}" && depth > 0 && --depth === 0) {
-        try {
-          result.push(JSON.parse(source.slice(start, index + 1)));
-        } catch {
-          return result;
+  var JsonArrayStream = class {
+    source = "";
+    cursor = 0;
+    opened = false;
+    stopped = false;
+    depth = 0;
+    start = -1;
+    quoted = false;
+    escaped = false;
+    objects = [];
+    push(chunk) {
+      if (this.stopped) return this.objects;
+      this.source += chunk;
+      for (; this.cursor < this.source.length; this.cursor++) {
+        const char = this.source[this.cursor];
+        if (!this.opened) {
+          if (/\s/.test(char ?? "")) continue;
+          if (char !== "[") {
+            this.stopped = true;
+            break;
+          }
+          this.opened = true;
+          continue;
+        }
+        if (this.quoted) {
+          if (this.escaped) this.escaped = false;
+          else if (char === "\\") this.escaped = true;
+          else if (char === '"') this.quoted = false;
+          continue;
+        }
+        if (char === '"') {
+          this.quoted = true;
+          continue;
+        }
+        if (char === "{") {
+          if (this.depth++ === 0) this.start = this.cursor;
+        } else if (char === "}" && this.depth > 0 && --this.depth === 0) {
+          try {
+            this.objects.push(JSON.parse(this.source.slice(this.start, this.cursor + 1)));
+          } catch {
+            this.stopped = true;
+            break;
+          }
+        } else if (char === "]" && this.depth === 0) {
+          this.stopped = true;
+          break;
         }
       }
+      return this.objects;
     }
-    return result;
-  }
+  };
 
   // src/translation/translation-text.ts
   var TRANSLATION_PROTECT_SELECTOR = "a,pre,code,kbd,samp,script,style,textarea,button,input,select,img,svg,video,audio,iframe";
@@ -911,20 +937,20 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
     }
     return Object.freeze(values);
   }
-  function vocabularyTail(raw) {
+  function vocabularyStart(raw) {
     let cursor = raw.indexOf("{") + 1;
-    if (!cursor) return "";
+    if (!cursor) return;
     for (; ; ) {
       while (/[\s,]/.test(raw[cursor] ?? "") && cursor < raw.length) cursor++;
       const key = streamedJsonString(raw, cursor);
-      if (!key) return "";
+      if (!key) return;
       cursor = key.next;
       while (/\s/.test(raw[cursor] ?? "") && cursor < raw.length) cursor++;
-      if (raw[cursor++] !== ":") return "";
+      if (raw[cursor++] !== ":") return;
       while (/\s/.test(raw[cursor] ?? "") && cursor < raw.length) cursor++;
-      if (key.value === "vocabulary") return raw.slice(cursor);
+      if (key.value === "vocabulary") return cursor;
       const value = streamedJsonString(raw, cursor);
-      if (!value) return "";
+      if (!value) return;
       cursor = value.next;
     }
   }
@@ -1046,8 +1072,15 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
   function translateAiBatch(sections, ai, signal, onPartial) {
     validateAiProfile(ai);
     const combined = sections.some((section) => section.onVocabulary);
+    const publishedWordCounts = /* @__PURE__ */ new Map();
     const publishWords = (words2, complete) => {
-      sections.forEach((section, index) => section.onVocabulary?.(words2.filter((word) => word && typeof word === "object" && "section" in word && word.section === `section_${index}`), complete));
+      sections.forEach((section, index) => {
+        if (!section.onVocabulary) return;
+        const selected = words2.filter((word) => word && typeof word === "object" && "section" in word && word.section === `section_${index}`);
+        if (!complete && selected.length === (publishedWordCounts.get(index) ?? 0)) return;
+        publishedWordCounts.set(index, selected.length);
+        section.onVocabulary(selected, complete);
+      });
     };
     const entries = sections.map((section, index) => ({ id: `section_${index}`, text: section.text, before: section.context?.before ?? "", after: section.context?.after ?? "" }));
     const published = /* @__PURE__ */ new Map();
@@ -1095,6 +1128,10 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
       const metric = measureRequest("translation", { sections: sections.length, model: ai.model, effort: ai.reasoningEffort ?? "low", fast: ai.fastMode === true });
       markContent = () => metric.content();
       const stream = new ResponseStreamDecoder(() => metric.milestone("first-output-delta"), (usage) => metric.usage(usage));
+      const vocabularyStream = new JsonArrayStream();
+      let vocabularyOffset;
+      let vocabularyRead = 0;
+      let wordCount = 0;
       const finish = (action2) => {
         if (settled) return;
         settled = true;
@@ -1170,15 +1207,36 @@ memoryExample为含word的典型易记英文例句，6–12词优先，简单日
           if (settled || response.status !== 200 || !/^\s*(?:event:|data:|:)/.test(response.responseText)) return;
           try {
             const raw = stream.push(response.responseText);
-            if (stream.done) decodeValues(raw);
-            const partials = streamedJsonRecord(raw);
-            if (combined) publishWords(completedArrayObjects(vocabularyTail(raw)), false);
-            entries.forEach((entry, index) => {
-              const partial = partials[entry.id]?.value;
-              const complete = partials[entry.id]?.complete === true;
-              if (!partial?.replace(/⟦[^⟧]*$/, "").trim() || complete && !translationProtectedTokensMatch(entry.text, partial)) return;
-              publishTranslation(index, partial, complete);
-            });
+            if (stream.done) {
+              const values2 = decodeValues(raw);
+              metric.finish(true);
+              finish(() => resolve(values2));
+              handle?.abort();
+              return;
+            }
+            if (entries.some((_entry, index) => !published.get(index)?.complete)) {
+              const partials = streamedJsonRecord(raw);
+              entries.forEach((entry, index) => {
+                if (published.get(index)?.complete) return;
+                const partial = partials[entry.id]?.value;
+                const complete = partials[entry.id]?.complete === true;
+                if (!partial?.replace(/⟦[^⟧]*$/, "").trim() || complete && !translationProtectedTokensMatch(entry.text, partial)) return;
+                publishTranslation(index, partial, complete);
+              });
+            }
+            if (combined) {
+              vocabularyOffset ??= vocabularyStart(raw);
+              if (vocabularyOffset !== void 0) {
+                const words2 = vocabularyStream.push(raw.slice(vocabularyOffset + vocabularyRead));
+                vocabularyRead = raw.length - vocabularyOffset;
+                if (words2.length !== wordCount) {
+                  wordCount = words2.length;
+                  publishWords([...words2], false);
+                }
+              }
+            }
+            const ending = raw.trimEnd();
+            if (!ending.endsWith("}") && !ending.endsWith("```")) return;
             let values;
             try {
               values = decodeValues(raw);
@@ -3612,6 +3670,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     timer;
     resumeAt = 0;
     touching = false;
+    pointers = /* @__PURE__ */ new Set();
     constructor() {
       if (typeof window === "undefined") return;
       window.addEventListener("scroll", this.onScroll, { capture: true, passive: true });
@@ -3619,6 +3678,9 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       window.addEventListener("touchstart", this.onTouchStart, { capture: true, passive: true });
       window.addEventListener("touchend", this.onTouchEnd, { capture: true, passive: true });
       window.addEventListener("touchcancel", this.onTouchEnd, { capture: true, passive: true });
+      window.addEventListener("pointerdown", this.onPointerDown, { capture: true, passive: true });
+      window.addEventListener("pointerup", this.onPointerEnd, { capture: true, passive: true });
+      window.addEventListener("pointercancel", this.onPointerEnd, { capture: true, passive: true });
       window.addEventListener("blur", this.onBlur);
     }
     onScroll = () => {
@@ -3631,10 +3693,21 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     onTouchEnd = (event) => {
       this.touching = event.touches.length > 0;
       this.onScroll();
-      if (this.paints.size && !this.touching) this.schedule(160);
+      if (this.paints.size && !this.touching && !this.pointers.size) this.schedule(160);
+    };
+    onPointerDown = (event) => {
+      if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+      this.pointers.add(event.pointerId);
+      this.onScroll();
+    };
+    onPointerEnd = (event) => {
+      if (!this.pointers.delete(event.pointerId)) return;
+      this.onScroll();
+      if (this.paints.size && !this.touching && !this.pointers.size) this.schedule(160);
     };
     onBlur = () => {
       this.touching = false;
+      this.pointers.clear();
       this.onScroll();
       if (this.paints.size) this.schedule(160);
     };
@@ -3647,7 +3720,7 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
     }
     paintNext() {
       this.timer = void 0;
-      if (this.touching || !this.paints.size) return;
+      if (this.touching || this.pointers.size || !this.paints.size) return;
       if (Date.now() < this.resumeAt) {
         this.schedule(this.resumeAt - Date.now());
         return;
@@ -3672,10 +3745,14 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
         window.removeEventListener("touchstart", this.onTouchStart, true);
         window.removeEventListener("touchend", this.onTouchEnd, true);
         window.removeEventListener("touchcancel", this.onTouchEnd, true);
+        window.removeEventListener("pointerdown", this.onPointerDown, true);
+        window.removeEventListener("pointerup", this.onPointerEnd, true);
+        window.removeEventListener("pointercancel", this.onPointerEnd, true);
         window.removeEventListener("blur", this.onBlur);
       }
       clearTimeout(this.timer);
       this.paints.clear();
+      this.pointers.clear();
     }
   };
 
@@ -4460,8 +4537,8 @@ memoryExample：含word的典型易记英文例句，最好6–12词，以简单
       const running = /* @__PURE__ */ new Set();
       const render = () => {
         if (!current()) return;
-        if (entry.kind === "body" && this.settings.vocabulary && !entry.learning) {
-          const owner = entry.element.closest('article[data-testid="tweet"],shreddit-post,.thing.link,[data-testid="post-container"]');
+        if (entry.kind !== "title" && this.settings.vocabulary && !entry.learning) {
+          const owner = entry.element.closest('article[data-testid="tweet"],shreddit-post,.thing.link,[data-testid="post-container"],[data-testid="search-post-with-content-preview"]');
           const permalink = owner?.querySelector("time")?.closest("a")?.getAttribute("href") ?? owner?.getAttribute("permalink") ?? owner?.querySelector('a[href*="/comments/"]')?.getAttribute("href") ?? location.href;
           const learningAnchor = entry.element.closest("[data-ft-long-post]")?.querySelector(':scope > [data-ft-owned="long-post-toggle"]') ?? box;
           entry.learning = mountVocabulary(learningAnchor, postContext, new URL(permalink, location.href).href, this.service, { original: entry.element, translations: entry.inlineBoxes.length ? entry.inlineBoxes : [box] });

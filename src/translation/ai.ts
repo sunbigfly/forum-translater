@@ -2,7 +2,7 @@ import type { RedditThreadContext } from '../reddit-context';
 import { measureRequest } from './metrics';
 import { TRANSLATION_PROMPT_VERSION } from './translation-prompt';
 import { TRANSLATION_PROMPT, COMBINED_TRANSLATION_PROMPT } from './translation-prompt';
-import { completedArrayObjects } from './json-array';
+import { JsonArrayStream } from './json-array';
 // Responses decoding adapted from Hacker News Reader Lite (MIT, sunbigfly 2026).
 import { translationProtectedTokensMatch } from "./translation-text";
 import { normalizeAiBaseUrl, validateAiProfile, type AiProfile } from "../settings";
@@ -70,18 +70,18 @@ function streamedJsonRecord(raw: string): Readonly<Record<string, StreamedJsonVa
   return Object.freeze(values);
 }
 
-function vocabularyTail(raw: string): string {
+function vocabularyStart(raw: string): number | undefined {
   let cursor = raw.indexOf('{') + 1;
-  if (!cursor) return '';
+  if (!cursor) return;
   for (;;) {
     while (/[\s,]/.test(raw[cursor] ?? '') && cursor < raw.length) cursor++;
-    const key = streamedJsonString(raw, cursor); if (!key) return '';
+    const key = streamedJsonString(raw, cursor); if (!key) return;
     cursor = key.next;
     while (/\s/.test(raw[cursor] ?? '') && cursor < raw.length) cursor++;
-    if (raw[cursor++] !== ':') return '';
+    if (raw[cursor++] !== ':') return;
     while (/\s/.test(raw[cursor] ?? '') && cursor < raw.length) cursor++;
-    if (key.value === 'vocabulary') return raw.slice(cursor);
-    const value = streamedJsonString(raw, cursor); if (!value) return '';
+    if (key.value === 'vocabulary') return cursor;
+    const value = streamedJsonString(raw, cursor); if (!value) return;
     cursor = value.next;
   }
 }
@@ -230,8 +230,14 @@ export function translateAi(source: string, ai: AiProfile, signal: AbortSignal, 
 export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, signal: AbortSignal, onPartial?: (index: number, text: string, complete: boolean) => void): Promise<string[]> {
   validateAiProfile(ai);
   const combined = sections.some(section => section.onVocabulary);
+  const publishedWordCounts = new Map<number, number>();
   const publishWords = (words: unknown[], complete: boolean): void => {
-    sections.forEach((section, index) => section.onVocabulary?.(words.filter(word => word && typeof word === 'object' && 'section' in word && word.section === `section_${index}`), complete));
+    sections.forEach((section, index) => {
+      if (!section.onVocabulary) return;
+      const selected = words.filter(word => word && typeof word === 'object' && 'section' in word && word.section === `section_${index}`);
+      if (!complete && selected.length === (publishedWordCounts.get(index) ?? 0)) return;
+      publishedWordCounts.set(index, selected.length); section.onVocabulary(selected, complete);
+    });
   };
   const entries = sections.map((section, index) => ({ id: `section_${index}`, text: section.text, before: section.context?.before ?? '', after: section.context?.after ?? '' }));
   const published = new Map<number, StreamedJsonValue>();
@@ -275,6 +281,10 @@ export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, 
     const metric = measureRequest('translation', { sections: sections.length, model: ai.model, effort: ai.reasoningEffort ?? 'low', fast: ai.fastMode === true });
     markContent = () => metric.content();
     const stream = new ResponseStreamDecoder(() => metric.milestone('first-output-delta'), usage => metric.usage(usage));
+    const vocabularyStream = new JsonArrayStream();
+    let vocabularyOffset: number | undefined;
+    let vocabularyRead = 0;
+    let wordCount = 0;
     const finish = (action: () => void): void => {
       if (settled) return;
       settled = true; clearTimeout(watchdog); signal.removeEventListener('abort', abort); action(); metric.finish(false);
@@ -316,15 +326,32 @@ export function translateAiBatch(sections: readonly AiSection[], ai: AiProfile, 
         if (settled || response.status !== 200 || !/^\s*(?:event:|data:|:)/.test(response.responseText)) return;
         try {
           const raw = stream.push(response.responseText);
-          if (stream.done) decodeValues(raw);
-          const partials = streamedJsonRecord(raw);
-          if (combined) publishWords(completedArrayObjects(vocabularyTail(raw)), false);
-          entries.forEach((entry, index) => {
-            const partial = partials[entry.id]?.value;
-            const complete = partials[entry.id]?.complete === true;
-            if (!partial?.replace(/⟦[^⟧]*$/, '').trim() || complete && !translationProtectedTokensMatch(entry.text, partial)) return;
-            publishTranslation(index, partial, complete);
-          });
+          if (stream.done) {
+            const values = decodeValues(raw);
+            metric.finish(true); finish(() => resolve(values)); handle?.abort(); return;
+          }
+          // Once a section is complete, vocabulary deltas must not reparse its text.
+          if (entries.some((_entry, index) => !published.get(index)?.complete)) {
+            const partials = streamedJsonRecord(raw);
+            entries.forEach((entry, index) => {
+              if (published.get(index)?.complete) return;
+              const partial = partials[entry.id]?.value;
+              const complete = partials[entry.id]?.complete === true;
+              if (!partial?.replace(/⟦[^⟧]*$/, '').trim() || complete && !translationProtectedTokensMatch(entry.text, partial)) return;
+              publishTranslation(index, partial, complete);
+            });
+          }
+          if (combined) {
+            vocabularyOffset ??= vocabularyStart(raw);
+            if (vocabularyOffset !== undefined) {
+              const words = vocabularyStream.push(raw.slice(vocabularyOffset + vocabularyRead));
+              vocabularyRead = raw.length - vocabularyOffset;
+              if (words.length !== wordCount) { wordCount = words.length; publishWords([...words], false); }
+            }
+          }
+          // Incomplete JSON is normal while streaming; do not throw/parse it per token.
+          const ending = raw.trimEnd();
+          if (!ending.endsWith('}') && !ending.endsWith('```')) return;
           let values: string[];
           try { values = decodeValues(raw); } catch { return; }
           stream.push(response.responseText, true);

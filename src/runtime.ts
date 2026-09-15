@@ -332,8 +332,8 @@ export class RedditRuntime {
     const running = new Set<number>();
     const render = (): void => {
       if (!current()) return;
-      if (entry.kind === 'body' && this.settings.vocabulary && !entry.learning) {
-        const owner = entry.element.closest('article[data-testid="tweet"],shreddit-post,.thing.link,[data-testid="post-container"]');
+      if (entry.kind !== 'title' && this.settings.vocabulary && !entry.learning) {
+        const owner = entry.element.closest('article[data-testid="tweet"],shreddit-post,.thing.link,[data-testid="post-container"],[data-testid="search-post-with-content-preview"]');
         const permalink = owner?.querySelector('time')?.closest('a')?.getAttribute('href') ?? owner?.getAttribute('permalink') ?? owner?.querySelector('a[href*="/comments/"]')?.getAttribute('href') ?? location.href;
         const learningAnchor = entry.element.closest('[data-ft-long-post]')?.querySelector<HTMLElement>(':scope > [data-ft-owned="long-post-toggle"]') ?? box;
         entry.learning = mountVocabulary(learningAnchor, postContext, new URL(permalink, location.href).href, this.service, { original: entry.element, translations: entry.inlineBoxes.length ? entry.inlineBoxes : [box] });
